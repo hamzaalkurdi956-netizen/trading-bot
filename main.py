@@ -8,7 +8,6 @@ import threading
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "8918068542:AAHxgD83YEV3HZgRUjNyw1XRSE7iaOUS1_0")
 
-# قراءة مفتاح Gemini بجميع احتمالات الأسماء المتوقعة في منصة Render
 GEMINI_API_KEY = (
     os.environ.get("GEMINI_API_KEY") or 
     os.environ.get("GEMINI_KEY") or 
@@ -82,20 +81,19 @@ def analyze_with_ai(symbol, price, closes):
         return fallback_analysis(symbol, price, ema, rsi)
 
     prompt = (
-        f"أنت خبير تداول واستراتيجيات السكالبينج الاحترافية (SMC & Technical Analysis).\n"
-        f"الزوج المطلوب: {symbol.upper()}\n"
-        f"السعر المباشر الآن: {price}\n"
-        f"مؤشر EMA 20: {ema}\n"
-        f"مؤشر RSI (14): {rsi}\n"
-        f"آخر إغلاقات للشموع (5m): {recent_closes}\n\n"
-        f"قم بتقديم تحليل فني دقيق واستراتيجية دخول واضحة بالصيغة التالية تماماً:\n"
-        f"📌 الاتجاه: (شراء BUY أو بيع SELL)\n"
+        f"حلل صفقة سكالبينج لـ {symbol.upper()}.\n"
+        f"السعر الحالي: {price}\n"
+        f"EMA20: {ema}\n"
+        f"RSI14: {rsi}\n"
+        f"آخر إغلاقات: {recent_closes}\n\n"
+        f"اعطني النتيجة بهيكل ملائم:\n"
+        f"📌 الاتجاه: (BUY أو SELL)\n"
         f"💵 سعر الدخول: {price}\n"
-        f"🛑 وقف الخسارة (SL): [حدد القيمة بدقة]\n"
-        f"🎯 الهدف الأول (TP1): [حدد القيمة بدقة]\n"
-        f"🎯 الهدف الثاني (TP2): [حدد القيمة بدقة]\n"
-        f"📊 المؤشرات الفنية: RSI: {rsi} | EMA20: {ema}\n"
-        f"💡 التبرير الفني: [شرح ملخص وواضح لسبب الصفقة بناءً على الشارت والمؤشرات]"
+        f"🛑 وقف الخسارة (SL): [القيمة]\n"
+        f"🎯 الهدف الأول (TP1): [القيمة]\n"
+        f"🎯 الهدف الثاني (TP2): [القيمة]\n"
+        f"📊 المؤشرات: RSI {rsi} | EMA20 {ema}\n"
+        f"💡 التبرير الفني: [سبب مدعوم بالمؤشرات]"
     )
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
