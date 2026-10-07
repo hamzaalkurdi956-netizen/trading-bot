@@ -7,7 +7,14 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "8918068542:AAHxgD83YEV3HZgRUjNyw1XRSE7iaOUS1_0")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+
+# قراءة مفتاح Gemini بجميع احتمالات الأسماء المتوقعة في منصة Render
+GEMINI_API_KEY = (
+    os.environ.get("GEMINI_API_KEY") or 
+    os.environ.get("GEMINI_KEY") or 
+    os.environ.get("GEMINI_API") or 
+    os.environ.get("API_KEY") or ""
+).strip()
 
 def fetch_chart_data(symbol):
     """جلب بيانات حركة الشارت والأسعار التاريخية للرمز"""
@@ -96,7 +103,7 @@ def analyze_with_ai(symbol, price, closes):
 
     try:
         req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
-        with urllib.request.urlopen(req, timeout=10) as response:
+        with urllib.request.urlopen(req, timeout=12) as response:
             res_data = json.loads(response.read().decode())
             ai_text = res_data['candidates'][0]['content']['parts'][0]['text']
             return f"🧠 **تحليل الشارت والذكاء الاصطناعي ({symbol.upper()})**\n━━━━━━━━━━━━━━━━━━━\n" + ai_text
