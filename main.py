@@ -6,14 +6,17 @@ import urllib.parse
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
 
-TOKEN = os.environ.get("TELEGRAM_TOKEN", "8918068542:AAHxgD83YEV3HZgRUjNyw1XRSE7iaOUS1_0")
+TOKEN = os.environ.get("TELEGRAM_TOKEN", "8918068542:AAHxgD83YEV3HZgRUjNyw1XRSE7iaOUS1_0").strip()
 
-GEMINI_API_KEY = (
+# تنظيف وتصفية قيمة مفتاح Gemini من أي مسافات أو أسطر مخفية
+raw_gemini_key = (
     os.environ.get("GEMINI_API_KEY") or 
     os.environ.get("GEMINI_KEY") or 
     os.environ.get("GEMINI_API") or 
     os.environ.get("API_KEY") or ""
-).strip()
+)
+# أخذ أول كلمة فقط من المفتاح لمنع أي نصوص زائدة تم نسخها بالخطأ
+GEMINI_API_KEY = raw_gemini_key.strip().split()[0] if raw_gemini_key.strip() else ""
 
 def fetch_chart_data(symbol):
     """جلب بيانات حركة الشارت والأسعار التاريخية للرمز"""
@@ -78,7 +81,7 @@ def analyze_with_ai(symbol, price, closes):
     recent_closes = [round(c, 2) for c in closes[-5:]] if closes else [price]
 
     if not GEMINI_API_KEY:
-        return "⚠️ مفتاح GEMINI_API_KEY غير موجود في متغيرات البيئة (Environment Variables)."
+        return fallback_analysis(symbol, price, ema, rsi)
 
     prompt = (
         f"أنت خبير تداول. قم بتحليل صفقة سكالبينج لـ {symbol.upper()}.\n"
@@ -91,13 +94,13 @@ def analyze_with_ai(symbol, price, closes):
         f"💵 سعر الدخول: {price}\n"
         f"🛑 وقف الخسارة (SL): [القيمة]\n"
         f"🎯 الهدف الأول (TP1): [القيمة]\n"
-        f"🎯 Target 2: [القيمة]\n"
+        f"🎯 الهدف الثاني (TP2): [القيمة]\n"
         f"📊 المؤشرات: RSI {rsi} | EMA20 {ema}\n"
         f"💡 التبرير الفني: [شرح ملخص بناءً على الحركة]"
     )
 
-    # تجربة طلب الـ API المباشر مع معالجة الأخطاء
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+    clean_key = urllib.parse.quote(GEMINI_API_KEY)
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={clean_key}"
     payload = json.dumps({"contents": [{"parts": [{"text": prompt}]}]}).encode('utf-8')
 
     try:
@@ -106,11 +109,27 @@ def analyze_with_ai(symbol, price, closes):
             res_data = json.loads(response.read().decode())
             ai_text = res_data['candidates'][0]['content']['parts'][0]['text']
             return f"🧠 تحليل الذكاء الاصطناعي ({symbol.upper()})\n━━━━━━━━━━━━━━━━━━━\n" + ai_text
-    except urllib.error.HTTPError as e:
-        error_content = e.read().decode('utf-8')
-        return f"❌ خطأ من Google Gemini API (كود {e.code}):\n{error_content}"
     except Exception as e:
-        return f"❌ خطأ أثناء الاتصال بالذكاء الاصطناعي: {str(e)}"
+        print(f"Gemini Error: {e}")
+        return fallback_analysis(symbol, price, ema, rsi)
+
+def fallback_analysis(symbol, price, ema, rsi):
+    action = "شراء (BUY) 🟢" if price > ema else "بيع (SELL) 🔴"
+    sl_p = price * 0.002
+    tp1_p = price * 0.003
+    tp2_p = price * 0.006
+
+    sl = round(price - sl_p if "BUY" in action else price + sl_p, 2)
+    tp1 = round(price + tp1_p if "BUY" in action else price - tp1_p, 2)
+    tp2 = round(price + tp2_p if "BUY" in action else price - tp2_p, 2)
+
+    return (
+        f"🎯 توصية سكالبينج فنية ({symbol.upper()})\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"📌 الاتجاه: {action}\n"
+        f"💵 السعر: {round(price, 2)} | EMA20: {ema} | RSI: {rsi}\n\n"
+        f"🛑 SL: {sl} | 🎯 TP1: {tp1} | 🎯 TP2: {tp2}"
+    )
 
 def send_message(chat_id, text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
