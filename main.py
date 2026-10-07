@@ -72,7 +72,7 @@ def calculate_ema(closes, period=20):
     return round(ema, 2)
 
 def analyze_with_ai(symbol, price, closes):
-    """تحليل الحركة الفنية عبر الربط المباشر مع Gemini 2.5 Flash"""
+    """تحليل الحركة الفنية عبر الربط المباشر مع Gemini 1.5 Flash"""
     rsi = calculate_rsi(closes)
     ema = calculate_ema(closes)
     recent_closes = [round(c, 2) for c in closes[-5:]] if closes else [price]
@@ -81,30 +81,32 @@ def analyze_with_ai(symbol, price, closes):
         return fallback_analysis(symbol, price, ema, rsi)
 
     prompt = (
-        f"حلل صفقة سكالبينج لـ {symbol.upper()}.\n"
+        f"أنت خبير تداول واستراتيجيات السكالبينج الاحترافية.\n"
+        f"الزوج: {symbol.upper()}\n"
         f"السعر الحالي: {price}\n"
-        f"EMA20: {ema}\n"
-        f"RSI14: {rsi}\n"
-        f"آخر إغلاقات: {recent_closes}\n\n"
-        f"اعطني النتيجة بهيكل ملائم:\n"
-        f"📌 الاتجاه: (BUY أو SELL)\n"
+        f"مؤشر EMA20: {ema}\n"
+        f"مؤشر RSI14: {rsi}\n"
+        f"إغلاقات الشموع: {recent_closes}\n\n"
+        f"قم بإعطاء توصية سكالبينج واضحة وقصيرة بهذا الشكل تماماً:\n"
+        f"📌 الاتجاه: (شراء BUY أو بيع SELL)\n"
         f"💵 سعر الدخول: {price}\n"
         f"🛑 وقف الخسارة (SL): [القيمة]\n"
         f"🎯 الهدف الأول (TP1): [القيمة]\n"
         f"🎯 الهدف الثاني (TP2): [القيمة]\n"
-        f"📊 المؤشرات: RSI {rsi} | EMA20 {ema}\n"
-        f"💡 التبرير الفني: [سبب مدعوم بالمؤشرات]"
+        f"📊 RSI: {rsi} | EMA20: {ema}\n"
+        f"💡 التبرير الفني: [شرح ملخص من سطر واحد بناءً على المؤشرات]"
     )
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    # الرابط والموديل المعتمد والمستقر رسمياً
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     payload = json.dumps({"contents": [{"parts": [{"text": prompt}]}]}).encode('utf-8')
 
     try:
         req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
-        with urllib.request.urlopen(req, timeout=12) as response:
+        with urllib.request.urlopen(req, timeout=10) as response:
             res_data = json.loads(response.read().decode())
             ai_text = res_data['candidates'][0]['content']['parts'][0]['text']
-            return f"🧠 **تحليل الشارت والذكاء الاصطناعي ({symbol.upper()})**\n━━━━━━━━━━━━━━━━━━━\n" + ai_text
+            return f"🧠 **تحليل الذكاء الاصطناعي والشارت ({symbol.upper()})**\n━━━━━━━━━━━━━━━━━━━\n" + ai_text
     except Exception as e:
         print(f"Gemini API Error: {e}")
         return fallback_analysis(symbol, price, ema, rsi)
