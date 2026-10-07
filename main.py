@@ -5,7 +5,6 @@ import urllib.request
 import urllib.parse
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
-from google import genai
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "8918068542:AAHxgD83YEV3HZgRUjNyw1XRSE7iaOUS1_0")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
@@ -46,7 +45,7 @@ def get_market_data(symbol):
         return None
 
 def analyze_with_ai(symbol, price):
-    """تحليل حركة السعر بواسطة الذكاء الاصطناعي Gemini عبر المكتبة الرسمية"""
+    """تحليل حركة السعر بواسطة الذكاء الاصطناعي عبر طلب HTTP مباشر لموديل Gemini 2.5 Flash"""
     if not GEMINI_API_KEY:
         return fallback_analysis(symbol, price)
 
@@ -64,13 +63,17 @@ def analyze_with_ai(symbol, price):
         f"💡 سبب التحليل الفني: [جملة واحدة ملخصة]"
     )
 
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    payload = json.dumps({
+        "contents": [{"parts": [{"text": prompt}]}]
+    }).encode('utf-8')
+
     try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
-        )
-        return f"🧠 **تحليل الذكاء الاصطناعي ({symbol.upper()})**\n━━━━━━━━━━━━━━━━━━━\n" + response.text
+        req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            res_data = json.loads(response.read().decode())
+            ai_text = res_data['candidates'][0]['content']['parts'][0]['text']
+            return f"🧠 **تحليل الذكاء الاصطناعي ({symbol.upper()})**\n━━━━━━━━━━━━━━━━━━━\n" + ai_text
     except Exception as e:
         print(f"Gemini API Error: {e}")
         return fallback_analysis(symbol, price)
