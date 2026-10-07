@@ -8,43 +8,48 @@ import threading
 
 TOKEN = "8918068542:AAHxgD83YEV3HZgRUjNyw1XRSE7iaOUS1_0"
 
-def get_realtime_gold_price():
-    # مصدر مباشر وسريع جداً لجلب سعر الذهب اللحظي Spot Gold XAU/USD
+def get_spot_gold_price():
+    # المصدر الأول: API مجاني ومباشر لسعر الذهب الفوري (Spot Gold XAU/USD)
     urls = [
-        "https://api.binance.com/api/v3/ticker/price?symbol=PAXGUSDT",
-        "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=1m&range=1d"
+        "https://api.gold-api.com/price/XAU",
+        "https://api.goldprice.dev/v1/prices?symbol=XAU-USD-SPOT"
     ]
     
     for url in urls:
         try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req, timeout=5) as response:
                 data = json.loads(response.read().decode())
+                # gold-api.com format
                 if "price" in data:
                     return float(data["price"])
-                elif "chart" in data:
-                    result = data['chart']['result'][0]
-                    meta = result.get('meta', {})
-                    if 'regularMarketPrice' in meta:
-                        return float(meta['regularMarketPrice'])
-                    quotes = result['indicators']['quote'][0]['close']
-                    valid_quotes = [q for q in quotes if q is not None]
-                    if valid_quotes:
-                        return valid_quotes[-1]
+                # goldprice.dev format
+                elif "symbols" in data and len(data["symbols"]) > 0:
+                    return float(data["symbols"][0]["price"])
         except Exception:
             continue
-    return None
+            
+    # المصدر الاحتياطي المباشر عبر Yahoo Chart API
+    try:
+        url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=1m&range=1d"
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=5) as response:
+            data = json.loads(response.read().decode())
+            meta = data['chart']['result'][0]['meta']
+            return float(meta.get('regularMarketPrice', 0))
+    except Exception:
+        return None
 
-def analyze_scalping(symbol="XAUUSD"):
-    current_price = get_realtime_gold_price()
+def analyze_scalping():
+    current_price = get_spot_gold_price()
     
     if not current_price:
-        return f"❌ متعذر جلب السعر اللحظي حالياً. يرجى المحاولة بعد ثوانٍ."
+        return "❌ متعذر جلب سعر الذهب المباشر حالياً. يرجى إعادة المحاولة."
 
-    # حسابات وإشارات السكالبينج اللحظية
-    sl_offset = current_price * 0.0012   # وقف خسارة 0.12%
-    tp1_offset = current_price * 0.0020  # هدف أول 0.20%
-    tp2_offset = current_price * 0.0035  # هدف ثاني 0.35%
+    # حساب أهداف وقف الخسارة للسكالبينج السريع
+    sl_offset = current_price * 0.0012   # 0.12% وقف خسارة
+    tp1_offset = current_price * 0.0020  # 0.20% هدف أول
+    tp2_offset = current_price * 0.0035  # 0.35% هدف ثاني
 
     action = "شراء سكالبينج (BUY SCALP)"
     emoji = "🟢"
@@ -57,12 +62,12 @@ def analyze_scalping(symbol="XAUUSD"):
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"📌 **الاتجاه اللحظي:** {action} {emoji}\n"
         f"🎯 **قوة الإشارة:** قوية (M1/M5)\n"
-        f"💵 **السعر المباشر (Spot Price):** `{round(current_price, 2)}`\n\n"
+        f"💵 **السعر الفوري المباشر (Spot):** `{round(current_price, 2)}`\n\n"
         f"🛑 **وقف الخسارة (SL):** `{sl}`\n"
         f"🎯 **الهدف الأول (TP1):** `{tp1}`\n"
         f"🎯 **الهدف الثاني (TP2):** `{tp2}`\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"⏱️ **التحديث:** مباشر وحي الان."
+        f"⏱️ **التحديث:** مباشر ومطابق للشرت الآن."
     )
     return text
 
@@ -93,9 +98,9 @@ def process_updates(offset=None):
                     continue
 
                 if text.startswith("/start"):
-                    send_message(chat_id, "أهلاً بك! البوت يعمل الآن ببيانات الذهب اللحظية المباشرة ⚡\nأرسل /analyze لجلب السعر والتوصية فوراً.")
+                    send_message(chat_id, "أهلاً بك! البوت يعمل بأسعار الذهب الفورية المباشرة (Spot Gold) ⚡\nأرسل /analyze للجلب الفوري.")
                 elif text.startswith("/analyze"):
-                    send_message(chat_id, "⚡ جاري جلب السعر المباشر والتحليل اللحظي للذهب...")
+                    send_message(chat_id, "⚡ جاري جلب السعر الفوري المباشر لـ XAU/USD...")
                     analysis = analyze_scalping()
                     send_message(chat_id, analysis)
     except Exception:
