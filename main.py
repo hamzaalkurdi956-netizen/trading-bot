@@ -5,14 +5,12 @@ import urllib.request
 import urllib.parse
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
-import yfinance as yf
-import pandas as pd
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "8918068542:AAHxgD83YEV3HZgRUjNyw1XRSE7iaOUS1_0")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 
-def get_market_analysis_data(symbol):
-    """جلب بيانات الشمعات وتحديث المؤشرات الفنية (RSI & EMA)"""
+def fetch_chart_data(symbol):
+    """جلب بيانات حركة الشارت والأسعار التاريخية للرمز"""
     symbol_clean = symbol.upper().strip().replace("/", "").replace(".ECN", "")
     
     ticker_map = {
@@ -22,67 +20,75 @@ def get_market_analysis_data(symbol):
     }
     
     target = ticker_map.get(symbol_clean, symbol_clean)
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(target)}?interval=5m&range=1d"
     
     try:
-        df = yf.download(tickers=target, period="1d", interval="5m", progress=False)
-        if df.empty or len(df) < 20:
-            df = yf.download(tickers=target, period="5d", interval="15m", progress=False)
-
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-
-        close_series = df['Close']
-        current_price = float(close_series.iloc[-1])
-
-        # حساب مؤشر EMA 20
-        ema20 = float(close_series.ewm(span=20, adjust=False).mean().iloc[-1])
-
-        # حساب مؤشر RSI 14
-        delta = close_series.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        rsi14 = float((100 - (100 / (1 + rs))).iloc[-1])
-
-        return {
-            "price": current_price,
-            "ema20": round(ema20, 2),
-            "rsi14": round(rsi14, 2),
-            "recent_closes": [round(x, 2) for x in close_series.tail(5).tolist()]
-        }
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=6) as response:
+            data = json.loads(response.read().decode())
+            result = data['chart']['result'][0]
+            closes = [c for c in result['indicators']['quote'][0]['close'] if c is not None]
+            current_price = float(result['meta'].get('regularMarketPrice', closes[-1]))
+            return current_price, closes
     except Exception as e:
-        print(f"Error fetching data: {e}")
-        return None
+        print(f"Fetch error: {e}")
+        return None, []
 
-def analyze_with_ai(symbol, data):
-    """تحليل الحركة والمؤشرات باستخدام Gemini 2.5 Flash"""
-    price = data["price"]
-    ema20 = data["ema20"]
-    rsi14 = data["rsi14"]
-    closes = data["recent_closes"]
+def calculate_rsi(closes, period=14):
+    """حساب مؤشر RSI14 برمجياً"""
+    if len(closes) < period + 1:
+        return 50.0
+    gains, losses = [], []
+    for i in range(1, len(closes)):
+        change = closes[i] - closes[i-1]
+        if change > 0:
+            gains.append(change)
+            losses.append(0)
+        else:
+            gains.append(0)
+            losses.append(abs(change))
+            
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return round(100 - (100 / (1 + rs)), 2)
+
+def calculate_ema(closes, period=20):
+    """حساب مؤشر EMA20 برمجياً"""
+    if not closes:
+        return 0.0
+    k = 2 / (period + 1)
+    ema = closes[0]
+    for price in closes[1:]:
+        ema = (price * k) + (ema * (1 - k))
+    return round(ema, 2)
+
+def analyze_with_ai(symbol, price, closes):
+    """تحليل الحركة الفنية عبر الربط المباشر مع Gemini 2.5 Flash"""
+    rsi = calculate_rsi(closes)
+    ema = calculate_ema(closes)
+    recent_closes = [round(c, 2) for c in closes[-5:]] if closes else [price]
 
     if not GEMINI_API_KEY:
-        return fallback_analysis(symbol, price, ema20, rsi14)
+        return fallback_analysis(symbol, price, ema, rsi)
 
     prompt = (
         f"أنت خبير تداول واستراتيجيات السكالبينج الاحترافية (SMC & Technical Analysis).\n"
-        f"الزوج: {symbol.upper()}\n"
-        f"السعر الحالي: {price}\n"
-        f"مؤشر EMA 20: {ema20}\n"
-        f"مؤشر RSI (14): {rsi14}\n"
-        f"إغلاقات الشموع الأخيرة: {closes}\n\n"
-        f"بناءً على الشروط الفنية:\n"
-        f"- إذا كان السعر فوق EMA20 وRSI معتدل إلى مرتفع، فضل الشراء (BUY).\n"
-        f"- إذا كان السعر تحت EMA20 وRSI مائل للهبوط، فضل البيع (SELL).\n"
-        f"- حدد وقف الخسارة والأهداف بدقة ملائمة لصفقة سكالبينج.\n\n"
-        f"أخرج النتيجة بالقالب التالي حصراً وبشكل منظم:\n"
+        f"الزوج المطلوب: {symbol.upper()}\n"
+        f"السعر المباشر الآن: {price}\n"
+        f"مؤشر EMA 20: {ema}\n"
+        f"مؤشر RSI (14): {rsi}\n"
+        f"آخر إغلاقات للشموع (5m): {recent_closes}\n\n"
+        f"قم بتقديم تحليل فني دقيق واستراتيجية دخول واضحة بالصيغة التالية تماماً:\n"
         f"📌 الاتجاه: (شراء BUY أو بيع SELL)\n"
         f"💵 سعر الدخول: {price}\n"
-        f"🛑 وقف الخسارة (SL): [القيمة]\n"
-        f"🎯 الهدف الأول (TP1): [القيمة]\n"
-        f"🎯 الهدف الثاني (TP2): [القيمة]\n"
-        f"📊 RSI: {rsi14} | EMA20: {ema20}\n"
-        f"💡 التبرير الفني: [جملة واضحة تشرح سبب الصفقة بناءً على المؤشرات]"
+        f"🛑 وقف الخسارة (SL): [حدد القيمة بدقة]\n"
+        f"🎯 الهدف الأول (TP1): [حدد القيمة بدقة]\n"
+        f"🎯 الهدف الثاني (TP2): [حدد القيمة بدقة]\n"
+        f"📊 المؤشرات الفنية: RSI: {rsi} | EMA20: {ema}\n"
+        f"💡 التبرير الفني: [شرح ملخص وواضح لسبب الصفقة بناءً على الشارت والمؤشرات]"
     )
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
@@ -90,17 +96,16 @@ def analyze_with_ai(symbol, data):
 
     try:
         req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
-        with urllib.request.urlopen(req, timeout=12) as response:
+        with urllib.request.urlopen(req, timeout=10) as response:
             res_data = json.loads(response.read().decode())
             ai_text = res_data['candidates'][0]['content']['parts'][0]['text']
             return f"🧠 **تحليل الشارت والذكاء الاصطناعي ({symbol.upper()})**\n━━━━━━━━━━━━━━━━━━━\n" + ai_text
     except Exception as e:
         print(f"Gemini API Error: {e}")
-        return fallback_analysis(symbol, price, ema20, rsi14)
+        return fallback_analysis(symbol, price, ema, rsi)
 
-def fallback_analysis(symbol, price, ema20, rsi14):
-    symbol_upper = symbol.upper()
-    action = "شراء (BUY) 🟢" if price > ema20 else "بيع (SELL) 🔴"
+def fallback_analysis(symbol, price, ema, rsi):
+    action = "شراء (BUY) 🟢" if price > ema else "بيع (SELL) 🔴"
     sl_p = price * 0.002
     tp1_p = price * 0.003
     tp2_p = price * 0.006
@@ -110,10 +115,10 @@ def fallback_analysis(symbol, price, ema20, rsi14):
     tp2 = round(price + tp2_p if "BUY" in action else price - tp2_p, 2)
 
     return (
-        f"🎯 **توصية فنية مبسطة ({symbol.upper()})**\n"
+        f"🎯 **توصية سكالبينج فنية ({symbol.upper()})**\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"📌 **الاتجاه:** {action}\n"
-        f"💵 **السعر:** `{round(price, 2)}` | **EMA20:** `{ema20}` | **RSI:** `{rsi14}`\n\n"
+        f"💵 **السعر:** `{round(price, 2)}` | **EMA20:** `{ema}` | **RSI:** `{rsi}`\n\n"
         f"🛑 **SL:** `{sl}` | 🎯 **TP1:** `{tp1}` | 🎯 **TP2:** `{tp2}`"
     )
 
@@ -144,14 +149,14 @@ def process_updates(offset=None):
                     continue
 
                 if text.startswith("/start"):
-                    send_message(chat_id, "أهلاً بك! البوت متصل بالذكاء الاصطناعي ومؤشرات الشارت الفنية ⚡\nأرسل /analyze GOLD أو /analyze US100 للتحليل.")
+                    send_message(chat_id, "أهلاً بك! البوت متصل بالذكاء الاصطناعي ومؤشرات الشارت المباشرة ⚡\nأرسل /analyze GOLD أو /analyze US100 للتحليل.")
                 elif text.startswith("/analyze"):
                     parts = text.split()
                     symbol = parts[1] if len(parts) > 1 else "XAUUSD"
-                    send_message(chat_id, f"📊 جاري قراءة بيانات الشارت والمؤشرات الفنية لـ {symbol.upper()}...")
-                    market_data = get_market_analysis_data(symbol)
-                    if market_data:
-                        analysis = analyze_with_ai(symbol, market_data)
+                    send_message(chat_id, f"📊 جاري قراءة حركة الشارت ومؤشرات RSI & EMA لـ {symbol.upper()}...")
+                    price, closes = fetch_chart_data(symbol)
+                    if price:
+                        analysis = analyze_with_ai(symbol, price, closes)
                     else:
                         analysis = f"❌ يتعذر جلب بيانات الشارت لـ {symbol.upper()}"
                     send_message(chat_id, analysis)
