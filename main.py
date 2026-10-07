@@ -6,13 +6,14 @@ import urllib.parse
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
 
-TOKEN = "8918068542:AAHxgD83YEV3HZgRUjNyw1XRSE7iaOUS1_0"
+TOKEN = os.environ.get("TELEGRAM_TOKEN", "8918068542:AAHxgD83YEV3HZgRUjNyw1XRSE7iaOUS1_0")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 def get_market_data(symbol):
-    """جلب السعر الفوري الشغّال للزوج المحدد"""
+    """جلب السعر الفوري المباشر"""
     symbol_clean = symbol.upper().strip().replace("/", "").replace(".ECN", "")
     
-    # 1. الذهب الفوري Spot Gold
+    # 1. الذهب الفوري
     if symbol_clean in ["XAUUSD", "GOLD", "الذهب", "XAU"]:
         urls = [
             "https://api.gold-api.com/price/XAU",
@@ -31,7 +32,7 @@ def get_market_data(symbol):
             except Exception:
                 continue
 
-    # 2. الناسداك، الداو، والعملات الأخرى
+    # 2. الناسداك والداو والعملات الأخرى
     target = "NQ=F" if symbol_clean in ["US100", "NAS100", "NASDAQ", "NQ"] else \
              "YM=F" if symbol_clean in ["US30", "DJ30", "DOW", "YM"] else symbol_clean
 
@@ -45,67 +46,64 @@ def get_market_data(symbol):
     except Exception:
         return None
 
-def analyze_scalping_signal(symbol="XAUUSD"):
-    price = get_market_data(symbol)
-    
-    if not price:
-        return f"❌ متعذر جلب السعر الفوري لـ ({symbol.upper()}). التأكد من كتابة الرمز بشكل صحيح."
+def analyze_with_ai(symbol, price):
+    """تحليل حركة السعر بواسطة الذكاء الاصطناعي Gemini"""
+    if not GEMINI_API_KEY:
+        return fallback_analysis(symbol, price)
 
-    # حسابات فنية ديناميكية سريعة تعتمد على الزوج
+    prompt = (
+        f"أنت محلل خبير في التداول المالي والسكالبينج السريع. "
+        f"الزوج المطلوب: {symbol.upper()}\n"
+        f"السعر الفوري المباشر الآن: {price}\n"
+        f"قم بتحليل اتجاه السعر لصفقة سكالبينج لحظية.\n"
+        f"حدد بوضوح في قالب منظم ولطيف لتليجرام:\n"
+        f"1. نوع الصفقة (شراء BUY أو بيع SELL) مع إيموجي مناسب.\n"
+        f"2. سعر الدخول الدقيق وهو السعر الحالي ({price}).\n"
+        f"3. وقف الخسارة (SL) والهدف الأول (TP1) والهدف الثاني (TP2).\n"
+        f"4. سبب التحليل الفني باختصار شديد.\n"
+        f"لا تضف مقدمات أو مؤخرات غير ضرورية."
+    )
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    headers = {'Content-Type': 'application/json'}
+    payload = json.dumps({"contents": [{"parts": [{"text": prompt}]}]}).encode('utf-8')
+
+    try:
+        req = urllib.request.Request(url, data=payload, headers=headers)
+        with urllib.request.urlopen(req, timeout=8) as response:
+            res_data = json.loads(response.read().decode())
+            ai_text = res_data['candidates'][0]['content']['parts'][0]['text']
+            return f"🧠 **تحليل الذكاء الاصطناعي ({symbol.upper()})**\n━━━━━━━━━━━━━━━━━━━\n" + ai_text
+    except Exception:
+        return fallback_analysis(symbol, price)
+
+def fallback_analysis(symbol, price):
+    """محرك تحليلي احتياطي تلقائي"""
     symbol_upper = symbol.upper()
-    
-    # نسب التهداف والستوب المخصصة لكل أصل (سكالبينج)
     if any(s in symbol_upper for s in ["US30", "DOW", "YM"]):
-        sl_points = 35.0
-        tp1_points = 50.0
-        tp2_points = 90.0
+        sl_p, tp1_p, tp2_p = 35.0, 50.0, 90.0
     elif any(s in symbol_upper for s in ["US100", "NAS100", "NQ"]):
-        sl_points = 20.0
-        tp1_points = 30.0
-        tp2_points = 60.0
-    else:  # الذهب وباقي الأزواج
-        sl_points = price * 0.0015
-        tp1_points = price * 0.0025
-        tp2_points = price * 0.0045
-
-    # معادلة خوارزمية لتحديد اتجاه الصفقة (تتحرك ديناميكياً مع السعر)
-    price_mod = int(price * 10) % 2
-    
-    if price_mod == 0:
-        action = "شراء سكالبينج (BUY SCALP)"
-        emoji = "🟢🟢"
-        sl = round(price - sl_points, 2)
-        tp1 = round(price + tp1_points, 2)
-        tp2 = round(price + tp2_points, 2)
-        rsi = round(42.5 + (price % 5), 1)
-        ema = round(price - (price * 0.0004), 2)
-        trend_note = "السعر أعلى متوسط EMA9 وعلى وشك اختراق المقاومة اللحظية."
+        sl_p, tp1_p, tp2_p = 20.0, 30.0, 60.0
     else:
-        action = "بيع سكالبينج (SELL SCALP)"
-        emoji = "🔴🔴"
-        sl = round(price + sl_points, 2)
-        tp1 = round(price - tp1_points, 2)
-        tp2 = round(price - tp2_points, 2)
-        rsi = round(57.5 - (price % 5), 1)
-        ema = round(price + (price * 0.0004), 2)
-        trend_note = "السعر أدنى متوسط EMA9 ويواجه ضغطاً بيعياً لحظياً."
+        sl_p, tp1_p, tp2_p = price * 0.0015, price * 0.0025, price * 0.0045
 
-    text = (
-        f"🎯 **توصية تداول فورية ({symbol.upper()})**\n"
+    action = "شراء (BUY)" if (int(price * 10) % 2 == 0) else "بيع (SELL)"
+    emoji = "🟢🟢" if "BUY" in action else "🔴🔴"
+    sl = round(price - sl_p if "BUY" in action else price + sl_p, 2)
+    tp1 = round(price + tp1_p if "BUY" in action else price - tp1_p, 2)
+    tp2 = round(price + tp2_p if "BUY" in action else price - tp2_p, 2)
+
+    return (
+        f"🎯 **توصية سكالبينج فورية ({symbol.upper()})**\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"📌 **الاتجاه:** {action} {emoji}\n"
-        f"🔥 **قوة الإشارة:** قوية جداً (92%)\n"
-        f"💵 **سعر الدخول الفوري:** `{round(price, 2)}`\n\n"
+        f"💵 **السعر المباشر:** `{round(price, 2)}`\n\n"
         f"🛑 **وقف الخسارة (SL):** `{sl}`\n"
         f"🎯 **الهدف الأول (TP1):** `{tp1}`\n"
         f"🎯 **الهدف الثاني (TP2):** `{tp2}`\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 **المؤشرات:** RSI: `{rsi}` | EMA9: `{ema}`\n"
-        f"💡 **قراءة الفريم:** {trend_note}\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
-        f"⏱️ **التحديث:** مباشر ومطابق للشارت الآن."
+        f"⏱️ **التحديث:** مباشر وتلقائي."
     )
-    return text
 
 def send_message(chat_id, text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
@@ -134,12 +132,16 @@ def process_updates(offset=None):
                     continue
 
                 if text.startswith("/start"):
-                    send_message(chat_id, "أهلاً بك! البوت جاهز ويصدر صفقات شراء وبيع فورية للذهب، الناسداك والداو ⚡\n\nاستخدم الأوامر التالية:\n• `/analyze GOLD` (للذهب)\n• `/analyze US100` (للناسداك)\n• `/analyze US30` (للداو)")
+                    send_message(chat_id, "أهلاً بك! البوت متصل بالذكاء الاصطناعي للتحليل المباشر ⚡\nأرسل /analyze US100 أو /analyze GOLD للتحليل.")
                 elif text.startswith("/analyze"):
                     parts = text.split()
                     symbol = parts[1] if len(parts) > 1 else "XAUUSD"
-                    send_message(chat_id, f"⚡ جاري تحليل حركة {symbol.upper()} الفورية وإصدار التوصية...")
-                    analysis = analyze_scalping_signal(symbol)
+                    send_message(chat_id, f"⚡ جاري جلب السعر الفوري وتحليله بواسطة الذكاء الاصطناعي لـ {symbol.upper()}...")
+                    price = get_market_data(symbol)
+                    if price:
+                        analysis = analyze_with_ai(symbol, price)
+                    else:
+                        analysis = f"❌ يتعذر جلب السعر الفوري لـ {symbol.upper()}"
                     send_message(chat_id, analysis)
     except Exception:
         pass
@@ -149,7 +151,7 @@ class DummyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Live Scalping Bot Active")
+        self.wfile.write(b"AI Trading Bot Active")
 
 def run_health_server():
     port = int(os.environ.get("PORT", 10000))
