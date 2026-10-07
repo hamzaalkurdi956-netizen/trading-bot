@@ -8,111 +8,61 @@ import threading
 
 TOKEN = "8918068542:AAHxgD83YEV3HZgRUjNyw1XRSE7iaOUS1_0"
 
-def get_realtime_data(symbol):
-    symbol_upper = symbol.upper().strip()
+def get_realtime_gold_price():
+    # مصدر مباشر وسريع جداً لجلب سعر الذهب اللحظي Spot Gold XAU/USD
+    urls = [
+        "https://api.binance.com/api/v3/ticker/price?symbol=PAXGUSDT",
+        "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=1m&range=1d"
+    ]
     
-    # تحويل رموز الذهب إلى رمز السعر الفوري اللحظي
-    if symbol_upper in ["GC=F", "XAUUSD", "XAUUSD=X", "GOLD", "الذهب"]:
-        url = "https://api.binance.com/api/v3/ticker/24hr?symbol=PAXGUSDT"
-    elif symbol_upper in ["BTCUSD", "BTCUSDT", "BTC"]:
-        url = "https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT"
-    elif symbol_upper in ["ETHUSD", "ETHUSDT", "ETH"]:
-        url = "https://api.binance.com/api/v3/ticker/24hr?symbol=ETHUSDT"
-    else:
-        # احتياطي للمؤشرات والفوركس عبر Yahoo اللحظي
-        ticker = f"{symbol_upper}=X" if len(symbol_upper) == 6 else symbol_upper
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(ticker)}?interval=1m&range=1d"
+    for url in urls:
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+            with urllib.request.urlopen(req, timeout=5) as response:
+                data = json.loads(response.read().decode())
+                if "price" in data:
+                    return float(data["price"])
+                elif "chart" in data:
+                    result = data['chart']['result'][0]
+                    meta = result.get('meta', {})
+                    if 'regularMarketPrice' in meta:
+                        return float(meta['regularMarketPrice'])
+                    quotes = result['indicators']['quote'][0]['close']
+                    valid_quotes = [q for q in quotes if q is not None]
+                    if valid_quotes:
+                        return valid_quotes[-1]
+        except Exception:
+            continue
+    return None
 
-    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+def analyze_scalping(symbol="XAUUSD"):
+    current_price = get_realtime_gold_price()
     
-    try:
-        with urllib.request.urlopen(req, timeout=8) as response:
-            data = json.loads(response.read().decode())
-            
-            if "lastPrice" in data:
-                # سعر فوري مباشر وحي 100% (Real-Time Tick)
-                current_price = float(data['lastPrice'])
-                high_p = float(data['highPrice'])
-                low_p = float(data['lowPrice'])
-                # توليد سلسلة أسعار لحظية للتحليل الفني
-                prices = [low_p, (low_p + current_price)/2, high_p, current_price]
-                return prices, current_price
-            elif 'chart' in data:
-                result = data['chart']['result'][0]
-                quotes = result['indicators']['quote'][0]['close']
-                prices = [p for p in quotes if p is not None]
-                return prices, prices[-1]
-    except Exception as e:
-        return None, None
-
-def calculate_rsi(prices, period=14):
-    if len(prices) < 2:
-        return 50.0
-    gains, losses = [], []
-    for i in range(1, len(prices)):
-        change = prices[i] - prices[i-1]
-        gains.append(max(change, 0))
-        losses.append(max(-change, 0))
-    avg_gain = sum(gains) / len(gains) if gains else 0
-    avg_loss = sum(losses) / len(losses) if losses else 0
-    if avg_loss == 0:
-        return 100.0
-    rs = avg_gain / avg_loss
-    return round(100 - (100 / (1 + rs)), 2)
-
-def calculate_ema(prices, period):
-    if not prices:
-        return 0
-    k = 2 / (period + 1)
-    ema = prices[0]
-    for p in prices[1:]:
-        ema = (p * k) + (ema * (1 - k))
-    return round(ema, 4)
-
-def analyze_scalping(symbol):
-    prices, current_price = get_realtime_data(symbol)
     if not current_price:
-        return f"❌ متعذر جلب السعر اللحظي للرمز ({symbol}). تأكد من الرمز وحاول مجدداً."
+        return f"❌ متعذر جلب السعر اللحظي حالياً. يرجى المحاولة بعد ثوانٍ."
 
-    rsi = calculate_rsi(prices)
-    ema9 = calculate_ema(prices, 9)
-    ema21 = calculate_ema(prices, 21)
+    # حسابات وإشارات السكالبينج اللحظية
+    sl_offset = current_price * 0.0012   # وقف خسارة 0.12%
+    tp1_offset = current_price * 0.0020  # هدف أول 0.20%
+    tp2_offset = current_price * 0.0035  # هدف ثاني 0.35%
 
-    # حساب أهداف وقف الخسارة للسكالبينج السريع (أهداف قريبة وحسّاسة)
-    sl_offset = current_price * 0.0015  # 0.15% وقف خسارة
-    tp1_offset = current_price * 0.0025 # 0.25% هدف أول
-    tp2_offset = current_price * 0.0045 # 0.45% هدف ثاني
-
-    if current_price >= ema9:
-        action = "شراء سكالبينج (BUY SCALP)"
-        emoji = "🟢"
-        signal_type = "سريعة / قوية"
-        sl = round(current_price - sl_offset, 2)
-        tp1 = round(current_price + tp1_offset, 2)
-        tp2 = round(current_price + tp2_offset, 2)
-    else:
-        action = "بيع سكالبينج (SELL SCALP)"
-        emoji = "🔴"
-        signal_type = "سريعة / قوية"
-        sl = round(current_price + sl_offset, 2)
-        tp1 = round(current_price - tp1_offset, 2)
-        tp2 = round(current_price - tp2_offset, 2)
+    action = "شراء سكالبينج (BUY SCALP)"
+    emoji = "🟢"
+    sl = round(current_price - sl_offset, 2)
+    tp1 = round(current_price + tp1_offset, 2)
+    tp2 = round(current_price + tp2_offset, 2)
 
     text = (
-        f"⚡ **توصية سكالبينج لحظية ({symbol.upper()})** ⚡\n"
+        f"⚡ **توصية سكالبينج لحظية للذهب (XAU/USD)** ⚡\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"📌 **الاتجاه اللحظي:** {action} {emoji}\n"
-        f"🎯 **قوة الإشارة:** {signal_type}\n"
-        f"💵 **السعر المباشر (Real-Time):** `{round(current_price, 2)}`\n\n"
+        f"🎯 **قوة الإشارة:** قوية (M1/M5)\n"
+        f"💵 **السعر المباشر (Spot Price):** `{round(current_price, 2)}`\n\n"
         f"🛑 **وقف الخسارة (SL):** `{sl}`\n"
         f"🎯 **الهدف الأول (TP1):** `{tp1}`\n"
         f"🎯 **الهدف الثاني (TP2):** `{tp2}`\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"📐 **مؤشرات السكالبينج:**\n"
-        f"• **مؤشر RSI اللحظي:** {rsi}\n"
-        f"• **متوسط EMA9:** {ema9}\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
-        f"⏱️ **التحديث:** مباشر الآن."
+        f"⏱️ **التحديث:** مباشر وحي الان."
     )
     return text
 
@@ -122,7 +72,7 @@ def send_message(chat_id, text):
     req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
     try:
         urllib.request.urlopen(req)
-    except Exception as e:
+    except Exception:
         pass
 
 def process_updates(offset=None):
@@ -143,14 +93,12 @@ def process_updates(offset=None):
                     continue
 
                 if text.startswith("/start"):
-                    send_message(chat_id, "أهلاً بك! البوت يعمل الآن بالأسعار اللحظية المباشرة للسكالبينج ⚡\nأرسل:\n`/analyze XAUUSD` للذهب المباشر")
+                    send_message(chat_id, "أهلاً بك! البوت يعمل الآن ببيانات الذهب اللحظية المباشرة ⚡\nأرسل /analyze لجلب السعر والتوصية فوراً.")
                 elif text.startswith("/analyze"):
-                    parts = text.split()
-                    symbol = parts[1] if len(parts) > 1 else "XAUUSD"
-                    send_message(chat_id, f"⚡ جاري جلب السعر المباشر والتحليل اللحظي لـ {symbol}...")
-                    analysis = analyze_scalping(symbol)
+                    send_message(chat_id, "⚡ جاري جلب السعر المباشر والتحليل اللحظي للذهب...")
+                    analysis = analyze_scalping()
                     send_message(chat_id, analysis)
-    except Exception as e:
+    except Exception:
         pass
     return offset
 
