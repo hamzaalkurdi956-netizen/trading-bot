@@ -2,10 +2,21 @@ import json
 import time
 import urllib.request
 import urllib.parse
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
 
-# التوكن الخاص بك
 TOKEN = "8918068542:AAHxgD83YEV3HZgRUjNyw1XRSE7iaOUS1_0"
 BASE_URL = f"https://api.telegram.org/bot{TOKEN}/"
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is alive!")
+
+def run_dummy_server():
+    server = HTTPServer(('0.0.0.0', 10000), HealthCheckHandler)
+    server.serve_forever()
 
 def send_message(chat_id, text):
     url = BASE_URL + "sendMessage"
@@ -107,6 +118,7 @@ def analyze_market(symbol):
     }
 
 def main():
+    threading.Thread(target=run_dummy_server, daemon=True).start()
     print("✅ البوت يعمل الآن...")
     last_update_id = 0
     while True:
