@@ -52,29 +52,31 @@ def analyze_with_ai(symbol, price):
         return fallback_analysis(symbol, price)
 
     prompt = (
-        f"أنت محلل خبير في التداول المالي والسكالبينج السريع. "
+        f"أنت محلل خبير في التداول المالي والسكالبينج السريع.\n"
         f"الزوج المطلوب: {symbol.upper()}\n"
         f"السعر الفوري المباشر الآن: {price}\n"
-        f"قم بتحليل اتجاه السعر لصفقة سكالبينج لحظية.\n"
-        f"حدد بوضوح في قالب منظم ولطيف لتليجرام:\n"
-        f"1. نوع الصفقة (شراء BUY أو بيع SELL) مع إيموجي مناسب.\n"
-        f"2. سعر الدخول الدقيق وهو السعر الحالي ({price}).\n"
-        f"3. وقف الخسارة (SL) والهدف الأول (TP1) والهدف الثاني (TP2).\n"
-        f"4. سبب التحليل الفني باختصار شديد.\n"
-        f"لا تضف مقدمات أو مؤخرات غير ضرورية."
+        f"قم بتحليل اتجاه السعر لصفقة سكالبينج لحظية باختصار شديد.\n\n"
+        f"حدد بوضوح بالقالب التالي بالضبط:\n"
+        f"📌 الاتجاه: (شراء BUY أو بيع SELL) مع إيموجي\n"
+        f"💵 سعر الدخول: {price}\n"
+        f"🛑 وقف الخسارة (SL): [حدد القيمة]\n"
+        f"🎯 الهدف الأول (TP1): [حدد القيمة]\n"
+        f"🎯 الهدف الثاني (TP2): [حدد القيمة]\n"
+        f"💡 سبب التحليل الفني: [جملة واحدة ملخصة]"
     )
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY.strip()}"
     headers = {'Content-Type': 'application/json'}
     payload = json.dumps({"contents": [{"parts": [{"text": prompt}]}]}).encode('utf-8')
 
     try:
         req = urllib.request.Request(url, data=payload, headers=headers)
-        with urllib.request.urlopen(req, timeout=8) as response:
+        with urllib.request.urlopen(req, timeout=10) as response:
             res_data = json.loads(response.read().decode())
             ai_text = res_data['candidates'][0]['content']['parts'][0]['text']
             return f"🧠 **تحليل الذكاء الاصطناعي ({symbol.upper()})**\n━━━━━━━━━━━━━━━━━━━\n" + ai_text
-    except Exception:
+    except Exception as e:
+        print(f"Gemini Error: {e}")
         return fallback_analysis(symbol, price)
 
 def fallback_analysis(symbol, price):
