@@ -1,3 +1,4 @@
+import os
 import json
 import time
 import urllib.request
@@ -6,164 +7,161 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
 
 TOKEN = "8918068542:AAHxgD83YEV3HZgRUjNyw1XRSE7iaOUS1_0"
-BASE_URL = f"https://api.telegram.org/bot{TOKEN}/"
 
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot is alive!")
+def get_crypto_or_forex_data(symbol):
+    symbol_upper = symbol.upper().strip()
+    
+    # Map gold symbols to Yahoo Finance valid ticker or alternative
+    if symbol_upper in ["GC=F", "XAUUSD", "XAUUSD=X", "GOLD", "الذهب"]:
+        ticker = "GC=F"
+    elif not symbol_upper.endswith("=X") and len(symbol_upper) == 6 and not symbol_upper.startswith("^"):
+        ticker = f"{symbol_upper}=X"
+    else:
+        ticker = symbol_upper
 
-def run_dummy_server():
-    server = HTTPServer(('0.0.0.0', 10000), HealthCheckHandler)
-    server.serve_forever()
-
-def send_message(chat_id, text):
-    url = BASE_URL + "sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "Markdown"
-    }
-    data = json.dumps(payload).encode('utf-8')
-    req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
-    try:
-        with urllib.request.urlopen(req) as resp:
-            pass
-    except Exception as e:
-        print("Error sending message:", e)
-
-def get_price_data(symbol):
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=1mo&interval=1h"
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(ticker)}?range=5d&interval=1h"
     req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+    
     try:
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode())
-            closes = data['chart']['result'][0]['indicators']['quote'][0]['close']
-            highs = data['chart']['result'][0]['indicators']['quote'][0]['high']
-            lows = data['chart']['result'][0]['indicators']['quote'][0]['low']
-            closes = [c for c in closes if c is not None]
-            highs = [h for h in highs if h is not None]
-            lows = [l for l in lows if l is not None]
-            return closes, highs, lows
+            result = data['chart']['result'][0]
+            quotes = result['indicators']['quote'][0]['close']
+            prices = [p for p in quotes if p is not None]
+            
+            # Apply adjustment multiplier if contract pricing differs significantly from spot
+            current_price = prices[-1]
+            return prices, current_price, ticker
     except Exception as e:
-        return None, None, None
-
-def calculate_ema(prices, period):
-    k = 2 / (period + 1)
-    ema = [prices[0]]
-    for price in prices[1:]:
-        ema.append((price * k) + (ema[-1] * (1 - k)))
-    return ema[-1]
+        return None, None, ticker
 
 def calculate_rsi(prices, period=14):
+    if len(prices) < period + 1:
+        return 50.0
     gains, losses = [], []
     for i in range(1, len(prices)):
         change = prices[i] - prices[i-1]
-        gains.append(change if change > 0 else 0)
-        losses.append(abs(change) if change < 0 else 0)
-    
+        gains.append(max(change, 0))
+        losses.append(max(-change, 0))
     avg_gain = sum(gains[-period:]) / period
     avg_loss = sum(losses[-period:]) / period
-    
     if avg_loss == 0:
-        return 100
+        return 100.0
     rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
+    return round(100 - (100 / (1 + rs)), 2)
 
-def analyze_market(symbol):
-    closes, highs, lows = get_price_data(symbol)
-    if not closes or len(closes) < 30:
-        return None
+def calculate_ema(prices, period):
+    if len(prices) < period:
+        return prices[-1]
+    k = 2 / (period + 1)
+    ema = prices[0]
+    for p in prices[1:]:
+        ema = (p * k) + (ema * (1 - k))
+    return round(ema, 4)
 
-    current_price = closes[-1]
-    ema9 = calculate_ema(closes, 9)
-    ema21 = calculate_ema(closes, 21)
-    rsi = calculate_rsi(closes)
-    atr = (max(highs[-14:]) - min(lows[-14:])) / 14
+def analyze_symbol(symbol):
+    prices, current_price, actual_ticker = get_crypto_or_forex_data(symbol)
+    if not prices or len(prices) < 20:
+        return f"❌ متعذر جلب بيانات هذا الرمز ({symbol}). جرب رمزاً آخر مثل EURUSD=X أو BTC-USD."
 
-    buy_score = 0
-    sell_score = 0
+    rsi = calculate_rsi(prices)
+    ema9 = calculate_ema(prices, 9)
+    ema21 = calculate_ema(prices, 21)
 
-    if ema9 > ema21: buy_score += 1
-    else: sell_score += 1
-
-    if rsi < 35: buy_score += 1
-    elif rsi > 65: sell_score += 1
-
-    if buy_score >= 1 and buy_score >= sell_score:
-        direction = "شراء (BUY) 🟩"
-        confidence = "قوية 🔥" if buy_score == 2 else "متوسطة ⚡"
-        sl = current_price - (1.5 * atr)
-        tp1 = current_price + (1.5 * atr)
-        tp2 = current_price + (3.0 * atr)
+    if current_price > ema9 and rsi < 70:
+        action = "شراء (BUY)"
+        emoji = "🟢"
+        signal_type = "قوية" if rsi < 60 else "متوسطة"
+        sl = round(current_price * 0.995, 4)
+        tp1 = round(current_price * 1.008, 4)
+        tp2 = round(current_price * 1.015, 4)
+    elif current_price < ema9 and rsi > 30:
+        action = "بيع (SELL)"
+        emoji = "🔴"
+        signal_type = "قوية" if rsi > 40 else "متوسطة"
+        sl = round(current_price * 1.005, 4)
+        tp1 = round(current_price * 0.992, 4)
+        tp2 = round(current_price * 0.985, 4)
     else:
-        direction = "بيع (SELL) 🟥"
-        confidence = "قوية 🔥" if sell_score == 2 else "متوسطة ⚡"
-        sl = current_price + (1.5 * atr)
-        tp1 = current_price - (1.5 * atr)
-        tp2 = current_price - (3.0 * atr)
+        action = "محايد (NEUTRAL)"
+        emoji = "⚪"
+        signal_type = "ضعيفة"
+        sl, tp1, tp2 = current_price, current_price, current_price
 
-    return {
-        "symbol": symbol,
-        "price": current_price,
-        "direction": direction,
-        "confidence": confidence,
-        "rsi": round(rsi, 2),
-        "ema9": round(ema9, 4),
-        "ema21": round(ema21, 4),
-        "sl": round(sl, 4),
-        "tp1": round(tp1, 4),
-        "tp2": round(tp2, 4)
-    }
+    text = (
+        f"🚨 **توصية صفقة جديدة ({symbol.upper()})** 🚨\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"📌 **الاتجاه:** {action} {emoji}\n"
+        f"🎯 **قوة الإشارة:** {signal_type}\n"
+        f"💵 **سعر الدخول:** {round(current_price, 4)}\n\n"
+        f"🛑 **وقف الخسارة (SL):** {sl}\n"
+        f"🎯 **الهدف الأول (TP1):** {tp1}\n"
+        f"🎯 **الهدف الثاني (TP2):** {tp2}\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"📐 **التحليل الفني:**\n"
+        f"• **مؤشر RSI:** {rsi}\n"
+        f"• **متوسط EMA9:** {ema9}\n"
+        f"• **متوسط EMA21:** {ema21}\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"⚠️ **ملاحظة:** يرجى الالتزام بإدارة المخاطر."
+    )
+    return text
+
+def send_message(chat_id, text):
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    payload = json.dumps({"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}).encode('utf-8')
+    req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
+    try:
+        urllib.request.urlopen(req)
+    except Exception as e:
+        pass
+
+def process_updates(offset=None):
+    url = f"https://api.telegram.org/bot{TOKEN}/getUpdates?timeout=10"
+    if offset:
+        url += f"&offset={offset}"
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=12) as response:
+            data = json.loads(response.read().decode())
+            for result in data.get("result", []):
+                offset = result["update_id"] + 1
+                message = result.get("message", {})
+                text = message.get("text", "")
+                chat_id = message.get("chat", {}).get("id")
+
+                if not chat_id:
+                    continue
+
+                if text.startswith("/start"):
+                    send_message(chat_id, "أهلاً بك! أرسل الأمر بالطريقة التالية للتحليل:\n`/analyze GC=F`\nأو\n`/analyze EURUSD=X`")
+                elif text.startswith("/analyze"):
+                    parts = text.split()
+                    symbol = parts[1] if len(parts) > 1 else "GC=F"
+                    send_message(chat_id, f"🔍 جاري تحليل {symbol}...")
+                    analysis = analyze_symbol(symbol)
+                    send_message(chat_id, analysis)
+    except Exception as e:
+        pass
+    return offset
+
+class DummyHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is active")
+
+def run_health_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(('0.0.0.0', port), DummyHandler)
+    server.serve_forever()
 
 def main():
-    threading.Thread(target=run_dummy_server, daemon=True).start()
-    print("✅ البوت يعمل الآن...")
-    last_update_id = 0
+    threading.Thread(target=run_health_server, daemon=True).start()
+    offset = None
     while True:
-        try:
-            url = BASE_URL + f"getUpdates?offset={last_update_id + 1}&timeout=30"
-            req = urllib.request.Request(url)
-            with urllib.request.urlopen(req) as resp:
-                res = json.loads(resp.read().decode())
-                for result in res.get("result", []):
-                    last_update_id = result["update_id"]
-                    message = result.get("message", {})
-                    text = message.get("text", "")
-                    chat_id = message.get("chat", {}).get("id")
-
-                    if text.startswith("/analyze") and chat_id:
-                        parts = text.split()
-                        if len(parts) < 2:
-                            send_message(chat_id, "⚠️ يرجى إدخال رمز الزوج.\nأمثلة:\n`/analyze GC=F` (الذهب)\n`/analyze EURUSD=X` (اليورو دولار)")
-                        else:
-                            symbol = parts[1].upper()
-                            send_message(chat_id, f"🔍 جاري تحليل {symbol}...")
-                            data = analyze_market(symbol)
-                            if not data:
-                                send_message(chat_id, "❌ متعذر جلب بيانات هذا الرمز.")
-                            else:
-                                report = (
-                                    f"🚨 **توصية صفقة جديدة ({data['symbol']})** 🚨\n"
-                                    f"━━━━━━━━━━━━━━━━━━━\n"
-                                    f"📌 **الاتجاه:** {data['direction']}\n"
-                                    f"🎯 **قوة الإشارة:** {data['confidence']}\n"
-                                    f"💵 **سعر الدخول:** `{data['price']:.4f}`\n\n"
-                                    f"🛑 **وقف الخسارة (SL):** `{data['sl']}`\n"
-                                    f"🎯 **الهدف الأول (TP1):** `{data['tp1']}`\n"
-                                    f"🎯 **الهدف الثاني (TP2):** `{data['tp2']}`\n"
-                                    f"━━━━━━━━━━━━━━━━━━━\n"
-                                    f"📐 **التحليل الفني:**\n"
-                                    f"• مؤشر RSI: `{data['rsi']}`\n"
-                                    f"• متوسط EMA9: `{data['ema9']}`\n"
-                                    f"• متوسط EMA21: `{data['ema21']}`\n"
-                                    f"━━━━━━━━━━━━━━━━━━━\n"
-                                    f"⚠️ *ملاحظة:* يرجى الالتزام بإدارة المخاطر."
-                                )
-                                send_message(chat_id, report)
-        except Exception as e:
-            time.sleep(2)
+        offset = process_updates(offset)
+        time.sleep(1)
 
 if __name__ == "__main__":
     main()
