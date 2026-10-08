@@ -6,7 +6,7 @@ from google import genai
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# --- 1. خادم ويب مدمج لتجاوز قيود Render ومنع السقوط (Timed Out) ---
+# --- 1. خادم ويب مدمج لتجاوز قيود Render ---
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -15,18 +15,18 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"Trading Bot is Live!")
 
     def log_message(self, format, *args):
-        return  # إخفاء سجلات الـ HTTP لعدم إزعاج السجلات الرئيسية
+        return
 
 def run_web_server():
     port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
     server.serve_forever()
 
-# --- 2. ضبط التوكن والمفاتيح (تم دمج التوكن الجديد هنا كقيمة افتراضية) ---
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8918068542:AAGxJ7qge_HSdOwJNmOhZ8OVbH6NlYklE50")
+# --- 2. جلب المفاتيح من متغيرات البيئة ---
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# --- 3. دالة جلب السعر اللحظي للسوق ---
+# --- 3. دالة جلب السعر اللحظي ---
 def get_realtime_market_data(symbol: str):
     clean_symbol = symbol.upper().replace("USD", "").replace("GOLD", "XAU")
     try:
@@ -48,7 +48,7 @@ def get_realtime_market_data(symbol: str):
 # --- 4. دالة التحليل بواسطة Gemini AI ---
 def analyze_with_gemini(symbol: str, price: float, ema20: float, rsi: float) -> str:
     if not GEMINI_API_KEY:
-        return "⚠️ خطأ: لم يتم ضبط GEMINI_API_KEY في متغيرات البيئة (Environment Variables) بـ Render."
+        return "⚠️ خطأ: لم يتم ضبط GEMINI_API_KEY في متغيرات البيئة في Render."
 
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
@@ -85,7 +85,7 @@ def analyze_with_gemini(symbol: str, price: float, ema20: float, rsi: float) -> 
     except Exception as e:
         return f"❌ خطأ أثناء الاتصال بالذكاء الاصطناعي: {str(e)}"
 
-# --- 5. أوامر التلغرام المباشرة ---
+# --- 5. أوامر التلغرام ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 أهلاً بك في بوت التحليل الفني المباشر!\n\nأرسل أمر التحليل مثل:\n`/analyze GOLD`\nأو\n`/analyze BTC`", parse_mode="Markdown")
 
@@ -106,17 +106,16 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- 6. التشغيل الرئيسي ---
 def main():
     if not TELEGRAM_TOKEN:
-        print("Error: TELEGRAM_BOT_TOKEN is missing!")
+        print("Error: TELEGRAM_BOT_TOKEN environment variable is missing!")
         return
 
-    # تشغيل خادم الويب في خلفية النظام
     threading.Thread(target=run_web_server, daemon=True).start()
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("analyze", analyze_command))
 
-    print("Trading Bot is running successfully with the new token...")
+    print("Trading Bot is running successfully...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
