@@ -6,13 +6,14 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# --- 1. خادم ويب لتلبية متطلبات Render ومعالجة الخمول ---
+# --- 1. خادم ويب لتلبية متطلبات Render و UptimeRobot ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        # الاستجابة لجميع المسارات والطلبات برمز 200 OK لمنع خطأ Down في UptimeRobot
         self.send_response(200)
-        self.send_header('Content-type', 'text/plain')
+        self.send_header('Content-type', 'text/plain; charset=utf-8')
         self.end_headers()
-        self.wfile.write(b"OK")
+        self.wfile.write(b"OK - Bot is running successfully")
 
     def log_message(self, format, *args):
         return
@@ -26,10 +27,10 @@ def start_health_server():
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# إعدادات مسافات السكالبينج بالدولار (يمكن تعديلها هنا مباشرة حسب رغبتك)
-STOP_LOSS_USD = 5.00   # وقف الخسارة: 5 دولار (50 نقطة)
-TP1_USD = 6.00         # الهدف الأول: 6 دولار (60 نقطة)
-TP2_USD = 12.00        # الهدف الثاني: 12 دولار (120 نقطة)
+# إعدادات أهداف واستوب السكالبينج (بالدولار / النقاط)
+STOP_LOSS_USD = 5.00   # وقف الخسارة: 5.00 دولار (50 نقطة)
+TP1_USD = 6.00         # الهدف الأول: 6.00 دولار (60 نقطة)
+TP2_USD = 12.00        # الهدف الثاني: 12.00 دولار (120 نقطة)
 
 # --- 3. جلب الأسعار المباشرة ---
 def fetch_market_price(symbol: str) -> dict:
@@ -64,6 +65,7 @@ def get_gemini_analysis(symbol: str, price: float, ema20: float, rsi: float) -> 
         tp2 = round(price - TP2_USD, 2)
         sl = round(price + STOP_LOSS_USD, 2)
 
+    # التحليل الاحتياطي المحلي في حال عدم وجود المفتاح أو تأخر الاستجابة
     if not GEMINI_API_KEY:
         return f"""🎯 **تأكيد صفقة بالذكاء الاصطناعي ({symbol})**
 ────────────────
@@ -133,7 +135,7 @@ SL: {sl}
 💡 **تحليل السكالبينج اللحظي:**
 إشارة {trend} بناءً على حركة السعر الحالية والمؤشرات اللحظية."""
 
-# --- 5. أوامر البوت ---
+# --- 5. أوامر بوت التلغرام ---
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 أهلاً بك! أرسل `/analyze GOLD` للتحليل المباشر.", parse_mode="Markdown")
 
@@ -155,8 +157,10 @@ if __name__ == "__main__":
         print("CRITICAL: TELEGRAM_BOT_TOKEN is missing!")
         exit(1)
 
+    # تشغيل خادم الويب في مسار مستقل (Thread)
     threading.Thread(target=start_health_server, daemon=True).start()
 
+    # تشغيل بوت التلغرام
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("analyze", analyze_cmd))
