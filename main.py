@@ -46,14 +46,13 @@ def get_realtime_market_data(symbol: str):
 
     return {"price": 2650.50, "ema20": 2648.10, "rsi": 54.2, "symbol": "XAU/USD"}
 
-# --- 4. دالة التحليل بواسطة Gemini AI ---
+# --- 4. دالة التحليل بواسطة Gemini AI المعالجة للضغط ---
 async def analyze_with_gemini(symbol: str, price: float, ema20: float, rsi: float) -> str:
     if not GEMINI_API_KEY:
         return "⚠️ خطأ: لم يتم ضبط GEMINI_API_KEY في متغيرات البيئة في Render."
 
-    try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        prompt = f"""
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    prompt = f"""
 أنت خبير تداول سكالبينج وتحليل فني محترف.
 لديك البيانات الحقيقية اللحظية التالية للسوق الآن:
 
@@ -78,17 +77,30 @@ async def analyze_with_gemini(symbol: str, price: float, ema20: float, rsi: floa
 💡 **تحليل Gemini:**
 [السبب الفني]
 """
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
-            None, 
-            lambda: client.models.generate_content(
-                model="gemini-3.8-flash",
-                contents=prompt,
+
+    models_to_try = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-1.5-flash"]
+    loop = asyncio.get_event_loop()
+
+    for model_name in models_to_try:
+        try:
+            response = await loop.run_in_executor(
+                None,
+                lambda m=model_name: client.models.generate_content(
+                    model=m,
+                    contents=prompt,
+                )
             )
-        )
-        return response.text
-    except Exception as e:
-        return f"❌ خطأ أثناء الاتصال بالذكاء الاصطناعي: {str(e)}"
+            return response.text
+        except Exception as e:
+            err_msg = str(e)
+            if "503" in err_msg or "UNAVAILABLE" in err_msg:
+                continue
+            elif "NOT_FOUND" in err_msg or "404" in err_msg:
+                continue
+            else:
+                return f"❌ خطأ أثناء الاتصال بالذكاء الاصطناعي: {err_msg}"
+
+    return "⚠️ سيرفرات Gemini تشهد ضغطاً شديداً حالياً، يرجى المحاولة بعد لحظات."
 
 # --- 5. أوامر التلغرام ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
