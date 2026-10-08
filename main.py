@@ -1,21 +1,26 @@
 import os
 import threading
 import requests
-from flask import Flask
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from google import genai
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# --- 1. خادم ويب وهمي لتجاوز قيود Render ومنع الـ Timed Out ---
-app_web = Flask(__name__)
+# --- 1. خادم ويب مدمج بـ Python (بدون مكتبات خارجية) لمنع Timed Out ---
+class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html')
+        self.end_headers()
+        self.wfile.write(b"Trading Bot is Live!")
 
-@app_web.route('/')
-def home():
-    return "Trading Bot is Live!"
+    def log_message(self, format, *args):
+        return  # إخفاء سجلات الـ HTTP لعدم إزعاج السجلات الرئيسية
 
 def run_web_server():
     port = int(os.environ.get("PORT", 8080))
-    app_web.run(host="0.0.0.0", port=port)
+    server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
+    server.serve_forever()
 
 # --- 2. جلب المفاتيح من متغيرات البيئة ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -39,10 +44,9 @@ def get_realtime_market_data(symbol: str):
     except Exception as e:
         print(f"Error fetching real-time price: {e}")
 
-    # سعر افتراضي احتياطي في حال التعثر
     return {"price": 2650.50, "ema20": 2648.10, "rsi": 54.2, "symbol": "XAU/USD"}
 
-# --- 4. دالة التحليل بواسطة الذكاء الاصطناعي Gemini ---
+# --- 4. دالة التحليل بواسطة Gemini ---
 def analyze_with_gemini(symbol: str, price: float, ema20: float, rsi: float) -> str:
     if not GEMINI_API_KEY:
         return "⚠️ خطأ: لم يتم ضبط GEMINI_API_KEY في Render Environment Variables."
@@ -79,7 +83,7 @@ def analyze_with_gemini(symbol: str, price: float, ema20: float, rsi: float) -> 
 [السبب الفني]
 """
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-1.5-flash",
             contents=prompt,
         )
         return response.text
@@ -110,14 +114,14 @@ def main():
         print("Error: TELEGRAM_BOT_TOKEN is missing!")
         return
 
-    # تشغيل خادم الويب الوهمي في Thread منفصل
+    # تشغيل خادم الويب المدمج في Thread منفصل
     threading.Thread(target=run_web_server, daemon=True).start()
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("analyze", analyze_command))
 
-    print("Trading Bot is running successfully with Gemini AI & Web Health Check...")
+    print("Trading Bot is running successfully with Gemini AI & Built-in Web Server...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
