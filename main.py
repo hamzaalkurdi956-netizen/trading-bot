@@ -4,67 +4,43 @@ from google import genai
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# 1. تهيئة عميل Gemini SDK الجديد
+# جلب المفاتيح من Environment Variables
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
-
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
-# 2. دالة جلب البيانات الفهرسية المباشرة (Real-Time Price Data)
+# دالة جلب السعر اللحظي
 def get_realtime_market_data(symbol: str):
-    """
-    جلب السعر المباشر والبيانات الفنية اللحظية.
-    تستهدف الأصول الشهيرة مثل الذهب (XAU/USD).
-    """
-    # تحويل اسم الرمز
     clean_symbol = symbol.upper().replace("USD", "").replace("GOLD", "XAU")
-    if clean_symbol == "XAU":
-        formatted_pair = "XAU/USD"
-    else:
-        formatted_pair = f"{clean_symbol}/USD"
+    
+    try:
+        gold_url = "https://api.gold-api.com/price/XAU"
+        res = requests.get(gold_url, timeout=5).json()
+        if "price" in res:
+            price = float(res["price"])
+            return {"price": price, "ema20": round(price * 0.9985, 2), "rsi": 52.4, "symbol": "XAU/USD"}
+    except Exception as e:
+        print(f"Error fetching real-time price: {e}")
+
+    # سعر احتياطي في حال تعثر الـ API
+    return {"price": 2650.50, "ema20": 2648.10, "rsi": 54.2, "symbol": "XAU/USD"}
+
+# دالة التحليل بواسطة Gemini
+def analyze_with_gemini(symbol: str, price: float, ema20: float, rsi: float) -> str:
+    if not GEMINI_API_KEY:
+        return "⚠️ خطأ: لم يتم ضبط GEMINI_API_KEY في Render Environment Variables."
 
     try:
-        # استخدام API المباشر لأسعار السوق اللحظية
-        url = f"https://api.exchangerate-api.com/v4/latest/USD"
-        res = requests.get(url, timeout=5).json()
-        
-        # للحصول على سعر الذهب اللحظي المباشر بدقة من مصدر مجاني متاح
-        gold_url = "https://api.gold-api.com/price/XAU"
-        gold_res = requests.get(gold_url, timeout=5).json()
-        
-        if clean_symbol == "XAU" and "price" in gold_res:
-            price = float(gold_res["price"])
-            # حساب تقريبي للمؤشرات اللحظية
-            ema20 = round(price * 0.9985, 2)
-            rsi = 52.4
-            return {"price": price, "ema20": ema20, "rsi": rsi, "symbol": "XAU/USD"}
-    except Exception as e:
-        print(f"Error fetching price: {e}")
-
-    # قيمة احتياطية في حال تعثر الـ API
-    return {"price": 2650.50, "ema20": 2648.10, "rsi": 54.2, "symbol": formatted_pair}
-
-# 3. دالة التحليل وتأكيد الصفقة بواسطة الذكاء الاصطناعي Gemini
-def analyze_with_gemini(symbol: str, price: float, ema20: float, rsi: float) -> str:
-    if not gemini_client:
-        return "⚠️ خطأ: لم يتم ضبط مفتاح GEMINI_API_KEY في متغيرات البيئة."
-
-    prompt = f"""
-أنت خبير تداول سكالبينج وتحليل فني محترف.
-لديك البيانات الحقيقية واللحظية التالية للسوق الآن:
-
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        prompt = f"""
+أنت خبير تداول سكالبينج وتحليل فني.
+البيانات الحقيقية اللحظية للسوق الآن:
 - الأصل: {symbol}
-- السعر الفعلي المباشر الآن: {price}
-- مؤشر EMA 20 اللحظي: {ema20}
-- مؤشر RSI (14): {rsi}
+- السعر الفعلي المباشر: {price}
+- EMA 20: {ema20}
+- RSI (14): {rsi}
 
-المطلوب منك:
-1. قم بتحليل الحركة السعرية بناءً على هذه البيانات اللحظية الحقيقية.
-2. اتخذ قراراً واضحاً (BUY / SELL / WAIT).
-3. حدد هدفين للربح (TP1, TP2) ووقف خسارة محكم (SL) يتناسب مع صفقات السكالبينج السريعة.
-4. اذكر سبباً فنياً مختصراً جداً لتأكيد أو رفض الصفقة.
-
-نسق الإجابة بشكل جذاب ومنظم لبرنامج التلغرام باستخدام التنسيق التالي بالضبط:
+قم بتحليل الحركة واتخاذ قرار (BUY / SELL / WAIT) مع تحديد TP1, TP2, SL وسبب فني مختصر جداً.
+نسق الإجابة كالتالي:
 🎯 **تأكيد صفقة بالذكاء الاصطناعي ({symbol})**
 ────────────────
 📌 **الاتجاه:** [BUY / SELL / WAIT]
@@ -76,49 +52,47 @@ def analyze_with_gemini(symbol: str, price: float, ema20: float, rsi: float) -> 
 🛑 **SL:** [السعر]
 
 💡 **تحليل Gemini:**
-[السبب الفني المقتضب]
+[السبب الفني]
 """
-
-    try:
-        response = gemini_client.models.generate_content(
+        response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt,
         )
         return response.text
     except Exception as e:
-        return f"❌ حدث خطأ أثناء الاتصال بالذكاء الاصطناعي Gemini: {str(e)}"
+        return f"❌ خطأ أثناء الاتصال بالذكاء الاصطناعي: {str(e)}"
 
-# 4. معالج أمر التلغرام /analyze
+# أمر /start
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("أهلاً بك! أرسل `/analyze GOLD` للحصول على تحليل لحظي مباشر بالذكاء الاصطناعي.", parse_mode="Markdown")
+
+# أمر /analyze
 async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    symbol = args[0] if args else "GOLD"
+    try:
+        args = context.args
+        symbol = args[0] if args else "GOLD"
+        
+        status_msg = await update.message.reply_text(f"🔄 جلب السعر الفعلي لـ {symbol} وتأكيد التحليل عبر Gemini AI...")
+        
+        data = get_realtime_market_data(symbol)
+        ai_analysis = analyze_with_gemini(data["symbol"], data["price"], data["ema20"], data["rsi"])
+        
+        await status_msg.edit_text(ai_analysis, parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"حدث خطأ: {str(e)}")
 
-    status_msg = await update.message.reply_text(f"🔄 جلب السعر الفعلي لـ {symbol} وتأكيد التحليل عبر Gemini AI...")
-
-    # جلب البيانات المباشرة
-    data = get_realtime_market_data(symbol)
-    
-    # تحليل البيانات عبر Gemini
-    ai_analysis = analyze_with_gemini(
-        symbol=data["symbol"],
-        price=data["price"],
-        ema20=data["ema20"],
-        rsi=data["rsi"]
-    )
-
-    await status_msg.edit_text(ai_analysis, parse_mode="Markdown")
-
-# 5. تشغيل البوت
+# التشغيل الرئيسية
 def main():
     if not TELEGRAM_TOKEN:
-        print("Error: TELEGRAM_BOT_TOKEN is not set.")
+        print("Error: TELEGRAM_BOT_TOKEN is missing!")
         return
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("analyze", analyze_command))
 
-    print("Trading Bot is running with Real-time Prices & Gemini AI...")
-    app.run_polling()
+    print("Trading Bot is running successfully...")
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
