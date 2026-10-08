@@ -6,7 +6,7 @@ from google import genai
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# --- 1. خادم ويب وهمي لإرضاء منصة Render ومنع الـ Timed Out ---
+# --- 1. خادم ويب وهمي لتجاوز قيود Render ومنع الـ Timed Out ---
 app_web = Flask(__name__)
 
 @app_web.route('/')
@@ -17,12 +17,14 @@ def run_web_server():
     port = int(os.environ.get("PORT", 8080))
     app_web.run(host="0.0.0.0", port=port)
 
-# --- 2. إعدادات المفاتيح ---
+# --- 2. جلب المفاتيح من متغيرات البيئة ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
-# --- 3. جلب بيانات السوق الحقيقية ---
+# --- 3. دالة جلب السعر الفعلي اللحظي ---
 def get_realtime_market_data(symbol: str):
+    clean_symbol = symbol.upper().replace("USD", "").replace("GOLD", "XAU")
+    
     try:
         gold_url = "https://api.gold-api.com/price/XAU"
         res = requests.get(gold_url, timeout=5).json()
@@ -37,9 +39,10 @@ def get_realtime_market_data(symbol: str):
     except Exception as e:
         print(f"Error fetching real-time price: {e}")
 
+    # سعر افتراضي احتياطي في حال التعثر
     return {"price": 2650.50, "ema20": 2648.10, "rsi": 54.2, "symbol": "XAU/USD"}
 
-# --- 4. دالة التحليل بواسطة Gemini ---
+# --- 4. دالة التحليل بواسطة الذكاء الاصطناعي Gemini ---
 def analyze_with_gemini(symbol: str, price: float, ema20: float, rsi: float) -> str:
     if not GEMINI_API_KEY:
         return "⚠️ خطأ: لم يتم ضبط GEMINI_API_KEY في Render Environment Variables."
@@ -48,14 +51,20 @@ def analyze_with_gemini(symbol: str, price: float, ema20: float, rsi: float) -> 
         client = genai.Client(api_key=GEMINI_API_KEY)
         prompt = f"""
 أنت خبير تداول سكالبينج وتحليل فني محترف.
-البيانات الحقيقية اللحظية للسوق الآن:
-- الأصل: {symbol}
-- السعر الفعلي المباشر: {price}
-- EMA 20: {ema20}
-- RSI (14): {rsi}
+لديك البيانات الحقيقية اللحظية التالية للسوق الآن:
 
-قم بتحليل الحركة واتخاذ قرار (BUY / SELL / WAIT) مع تحديد TP1, TP2, SL وسبب فني مختصر جداً.
-نسق الإجابة كالتالي:
+- الأصل: {symbol}
+- السعر الفعلي المباشر الآن: {price}
+- مؤشر EMA 20 اللحظي: {ema20}
+- مؤشر RSI (14): {rsi}
+
+المطلوب منك:
+1. قم بتحليل الحركة السعرية بناءً على هذه البيانات اللحظية.
+2. اتخذ قراراً واضحاً (BUY / SELL / WAIT).
+3. حدد هدفين للربح (TP1, TP2) ووقف خسارة محكم (SL) يتناسب مع صفقات السكالبينج.
+4. اذكر سبباً فنياً مختصراً جداً لتأكيد أو رفض الصفقة.
+
+نسق الإجابة بشكل جذاب ومنظم لبرنامج التلغرام بالتنسيق التالي:
 🎯 **تأكيد صفقة بالذكاء الاصطناعي ({symbol})**
 ────────────────
 📌 **الاتجاه:** [BUY / SELL / WAIT]
@@ -101,7 +110,7 @@ def main():
         print("Error: TELEGRAM_BOT_TOKEN is missing!")
         return
 
-    # تشغيل خادم الويب الوهمي في Thread منفصل لعدم تعطيل التلغرام
+    # تشغيل خادم الويب الوهمي في Thread منفصل
     threading.Thread(target=run_web_server, daemon=True).start()
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
