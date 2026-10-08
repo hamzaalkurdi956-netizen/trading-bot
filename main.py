@@ -9,7 +9,6 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 # --- 1. خادم ويب لتلبية متطلبات Render و UptimeRobot ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        # الاستجابة لجميع المسارات والطلبات برمز 200 OK لمنع خطأ Down في UptimeRobot
         self.send_response(200)
         self.send_header('Content-type', 'text/plain; charset=utf-8')
         self.end_headers()
@@ -27,86 +26,97 @@ def start_health_server():
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# إعدادات أهداف واستوب السكالبينج (بالدولار / النقاط)
-STOP_LOSS_USD = 5.00   # وقف الخسارة: 5.00 دولار (50 نقطة)
-TP1_USD = 6.00         # الهدف الأول: 6.00 دولار (60 نقطة)
-TP2_USD = 12.00        # الهدف الثاني: 12.00 دولار (120 نقطة)
+STOP_LOSS_USD = 5.00   # وقف الخسارة: 5 دولار
+TP1_USD = 6.00         # الهدف الأول: 6 دولار
+TP2_USD = 12.00        # الهدف الثاني: 12 دولار
 
-# --- 3. جلب الأسعار المباشرة ---
+# --- 3. جلب الأسعار والمؤشرات الديناميكية الحقيقية ---
+def calculate_rsi(prices, period=14):
+    if len(prices) < period + 1:
+        return 50.0
+    gains, losses = [], []
+    for i in range(1, len(prices)):
+        change = prices[i] - prices[i - 1]
+        if change >= 0:
+            gains.append(change)
+            losses.append(0)
+        else:
+            gains.append(0)
+            losses.append(abs(change))
+            
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return round(100 - (100 / (1 + rs)), 1)
+
 def fetch_market_price(symbol: str) -> dict:
     clean_symbol = symbol.upper().replace("USD", "").replace("GOLD", "XAU")
     try:
-        url = "https://api.gold-api.com/price/XAU"
+        # جلب شمعات سابقة لحساب الاتجاه والمؤشرات الحقيقية
+        url = "https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval=15m&limit=30"
         res = requests.get(url, timeout=5).json()
-        if "price" in res:
-            price = round(float(res["price"]), 2)
-            return {
-                "price": price,
-                "ema20": round(price * 0.9985, 2),
-                "rsi": 52.4,
-                "symbol": "XAU/USD"
-            }
+        closes = [float(candle[4]) for candle in res]
+        
+        current_price = round(closes[-1], 2)
+        ema20 = round(sum(closes[-20:]) / 20, 2)
+        rsi = calculate_rsi(closes)
+
+        return {
+            "price": current_price,
+            "ema20": ema20,
+            "rsi": rsi,
+            "symbol": "XAU/USD"
+        }
     except Exception as e:
-        print(f"Price Fetch Error: {e}")
+        print(f"Price/Indicator Fetch Error: {e}")
 
-    return {"price": 2650.50, "ema20": 2648.10, "rsi": 54.2, "symbol": clean_symbol}
+    # fallback
+    return {"price": 2650.50, "ema20": 2655.00, "rsi": 42.0, "symbol": clean_symbol}
 
-# --- 4. محرك التحليل وحسابات السكالبينج ---
+# --- 4. محرك التحليل السليم ---
 def get_gemini_analysis(symbol: str, price: float, ema20: float, rsi: float) -> str:
     price = round(price, 2)
-    trend = "BUY" if price > ema20 and rsi > 50 else "SELL"
-
-    if trend == "BUY":
+    
+    # تحديد الاتجاه بناءً على مؤشرات حقيقية (شراء / بيع / انتظار)
+    if price > ema20 and rsi > 52:
+        trend = "BUY"
         tp1 = round(price + TP1_USD, 2)
         tp2 = round(price + TP2_USD, 2)
         sl = round(price - STOP_LOSS_USD, 2)
-    else:
+    elif price < ema20 and rsi < 48:
+        trend = "SELL"
         tp1 = round(price - TP1_USD, 2)
         tp2 = round(price - TP2_USD, 2)
         sl = round(price + STOP_LOSS_USD, 2)
+    else:
+        trend = "WAIT (سوق محايد / تذبذب)"
+        tp1, tp2, sl = "N/A", "N/A", "N/A"
 
-    # التحليل الاحتياطي المحلي في حال عدم وجود المفتاح أو تأخر الاستجابة
-    if not GEMINI_API_KEY:
+    if not GEMINI_API_KEY or trend.startswith("WAIT"):
         return f"""🎯 **تأكيد صفقة بالذكاء الاصطناعي ({symbol})**
 ────────────────
 📌 **الاتجاه:** {trend}
 💵 **السعر الحالي:** {price}
-📊 **RSI:** {rsi} | **EMA20:** {ema20}
+📊 **RSI (15m):** {rsi} | **EMA20:** {ema20}
 
 🎯 **TP1:** {tp1}
 🎯 **TP2:** {tp2}
 🛑 **SL:** {sl}
 
-💡 **التحليل الفني (سكالبينج):**
-إشارة {trend} لحظية. السعر {'أعلى' if price > ema20 else 'أدنى'} من متوسط EMA20 مع زخم RSI عند {rsi}."""
+💡 **التحليل الفني:**
+{'السعر أعلى من EMA20 والزخم إيجابي.' if trend == 'BUY' else 'السعر أدنى من EMA20 والزخم سلبي وهابط.' if trend == 'SELL' else 'السوق في حالة تذبذب حالياً، ينصح بعدم الدخول.'}"""
 
     prompt_text = f"""
-أنت خبير تداول سكالبينج محترف على الذهب.
-بيانات السوق الآن:
-- الأصل: {symbol}
-- السعر المباشر: {price}
-- EMA 20: {ema20}
-- RSI: {rsi}
+أنت خبير تداول سكالبينج.
+بيانات الذهب الحقيقية الحالية:
+- السعر: {price}
+- EMA20: {ema20}
+- RSI (15m): {rsi}
+- الاتجاه الفني الحسابي: {trend}
 
-قدم تحليلاً موجزاً جداً للصفقة التالية:
-الاتجاه: {trend}
-TP1: {tp1}
-TP2: {tp2}
-SL: {sl}
-
-نسق الإجابة بنفس الشكل تماماً:
-🎯 **تأكيد صفقة بالذكاء الاصطناعي ({symbol})**
-────────────────
-📌 **الاتجاه:** {trend}
-💵 **السعر الحالي:** {price}
-📊 **RSI:** {rsi} | **EMA20:** {ema20}
-
-🎯 **TP1:** {tp1}
-🎯 **TP2:** {tp2}
-🛑 **SL:** {sl}
-
-💡 **تحليل Gemini للسكالبينج:**
-[سبب فني مختصر في سطرين فقط]
+اكتب تحليلاً موجزاً جداً لتأكيد صفقة الـ {trend}.
 """
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
@@ -116,7 +126,6 @@ SL: {sl}
     try:
         response = requests.post(url, json=payload, headers=headers, timeout=8)
         res_data = response.json()
-
         if response.status_code == 200 and "candidates" in res_data:
             return res_data["candidates"][0]["content"]["parts"][0]["text"]
     except Exception as e:
@@ -126,14 +135,11 @@ SL: {sl}
 ────────────────
 📌 **الاتجاه:** {trend}
 💵 **السعر الحالي:** {price}
-📊 **RSI:** {rsi} | **EMA20:** {ema20}
+📊 **RSI (15m):** {rsi} | **EMA20:** {ema20}
 
 🎯 **TP1:** {tp1}
 🎯 **TP2:** {tp2}
-🛑 **SL:** {sl}
-
-💡 **تحليل السكالبينج اللحظي:**
-إشارة {trend} بناءً على حركة السعر الحالية والمؤشرات اللحظية."""
+🛑 **SL:** {sl}"""
 
 # --- 5. أوامر بوت التلغرام ---
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -142,7 +148,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         symbol = context.args[0] if context.args else "GOLD"
-        msg = await update.message.reply_text(f"🔄 جاري جلب السعر وتحليل {symbol}...")
+        msg = await update.message.reply_text(f"🔄 جاري جلب المؤشرات وتحليل {symbol}...")
         
         data = fetch_market_price(symbol)
         result = get_gemini_analysis(data["symbol"], data["price"], data["ema20"], data["rsi"])
@@ -157,10 +163,8 @@ if __name__ == "__main__":
         print("CRITICAL: TELEGRAM_BOT_TOKEN is missing!")
         exit(1)
 
-    # تشغيل خادم الويب في مسار مستقل (Thread)
     threading.Thread(target=start_health_server, daemon=True).start()
 
-    # تشغيل بوت التلغرام
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("analyze", analyze_cmd))
