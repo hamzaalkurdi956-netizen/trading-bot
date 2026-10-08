@@ -1,6 +1,7 @@
 import os
 import threading
 import requests
+import asyncio
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from google import genai
 from telegram import Update
@@ -46,7 +47,7 @@ def get_realtime_market_data(symbol: str):
     return {"price": 2650.50, "ema20": 2648.10, "rsi": 54.2, "symbol": "XAU/USD"}
 
 # --- 4. دالة التحليل بواسطة Gemini AI ---
-def analyze_with_gemini(symbol: str, price: float, ema20: float, rsi: float) -> str:
+async def analyze_with_gemini(symbol: str, price: float, ema20: float, rsi: float) -> str:
     if not GEMINI_API_KEY:
         return "⚠️ خطأ: لم يتم ضبط GEMINI_API_KEY في متغيرات البيئة في Render."
 
@@ -77,9 +78,13 @@ def analyze_with_gemini(symbol: str, price: float, ema20: float, rsi: float) -> 
 💡 **تحليل Gemini:**
 [السبب الفني]
 """
-        response = client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=prompt,
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None, 
+            lambda: client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+            )
         )
         return response.text
     except Exception as e:
@@ -97,7 +102,7 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status_msg = await update.message.reply_text(f"🔄 جلب السعر الفعلي لـ {symbol} وتأكيد التحليل عبر Gemini AI...")
         
         data = get_realtime_market_data(symbol)
-        ai_analysis = analyze_with_gemini(data["symbol"], data["price"], data["ema20"], data["rsi"])
+        ai_analysis = await analyze_with_gemini(data["symbol"], data["price"], data["ema20"], data["rsi"])
         
         await status_msg.edit_text(ai_analysis, parse_mode="Markdown")
     except Exception as e:
