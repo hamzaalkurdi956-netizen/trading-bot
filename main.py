@@ -6,7 +6,7 @@ from google import genai
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# --- 1. خادم ويب مدمج بـ Python (بدون مكتبات خارجية) لمنع Timed Out ---
+# --- 1. خادم ويب مدمج لتجاوز قيود Render ---
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -15,7 +15,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"Trading Bot is Live!")
 
     def log_message(self, format, *args):
-        return  # إخفاء سجلات الـ HTTP لعدم إزعاج السجلات الرئيسية
+        return
 
 def run_web_server():
     port = int(os.environ.get("PORT", 8080))
@@ -26,10 +26,9 @@ def run_web_server():
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
-# --- 3. دالة جلب السعر الفعلي اللحظي ---
+# --- 3. دالة جلب السعر اللحظي ---
 def get_realtime_market_data(symbol: str):
     clean_symbol = symbol.upper().replace("USD", "").replace("GOLD", "XAU")
-    
     try:
         gold_url = "https://api.gold-api.com/price/XAU"
         res = requests.get(gold_url, timeout=5).json()
@@ -49,7 +48,7 @@ def get_realtime_market_data(symbol: str):
 # --- 4. دالة التحليل بواسطة Gemini ---
 def analyze_with_gemini(symbol: str, price: float, ema20: float, rsi: float) -> str:
     if not GEMINI_API_KEY:
-        return "⚠️ خطأ: لم يتم ضبط GEMINI_API_KEY في Render Environment Variables."
+        return "⚠️ خطأ: لم يتم ضبط GEMINI_API_KEY في Render."
 
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
@@ -62,13 +61,9 @@ def analyze_with_gemini(symbol: str, price: float, ema20: float, rsi: float) -> 
 - مؤشر EMA 20 اللحظي: {ema20}
 - مؤشر RSI (14): {rsi}
 
-المطلوب منك:
-1. قم بتحليل الحركة السعرية بناءً على هذه البيانات اللحظية.
-2. اتخذ قراراً واضحاً (BUY / SELL / WAIT).
-3. حدد هدفين للربح (TP1, TP2) ووقف خسارة محكم (SL) يتناسب مع صفقات السكالبينج.
-4. اذكر سبباً فنياً مختصراً جداً لتأكيد أو رفض الصفقة.
+قم بتحليل الحركة السعرية واتخذ قراراً واضحاً (BUY / SELL / WAIT) مع تحديد TP1, TP2, SL وسبب فني مختصر جداً.
 
-نسق الإجابة بشكل جذاب ومنظم لبرنامج التلغرام بالتنسيق التالي:
+نسق الإجابة بالتنسيق التالي:
 🎯 **تأكيد صفقة بالذكاء الاصطناعي ({symbol})**
 ────────────────
 📌 **الاتجاه:** [BUY / SELL / WAIT]
@@ -83,16 +78,16 @@ def analyze_with_gemini(symbol: str, price: float, ema20: float, rsi: float) -> 
 [السبب الفني]
 """
         response = client.models.generate_content(
-            model="gemini-1.5-flash",
+            model="gemini-2.5-flash",
             contents=prompt,
         )
         return response.text
     except Exception as e:
         return f"❌ خطأ أثناء الاتصال بالذكاء الاصطناعي: {str(e)}"
 
-# --- 5. أوامر التلغرام ---
+# --- 5. أوامر التلغرام المباشرة ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("أهلاً بك! أرسل `/analyze GOLD` للحصول على تحليل لحظي مباشر بالذكاء الاصطناعي.", parse_mode="Markdown")
+    await update.message.reply_text("👋 أهلاً بك في بوت التحليل الفني المباشر!\n\nأرسل أمر التحليل مثل:\n`/analyze GOLD`\nأو\n`/analyze BTC`", parse_mode="Markdown")
 
 async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -114,14 +109,13 @@ def main():
         print("Error: TELEGRAM_BOT_TOKEN is missing!")
         return
 
-    # تشغيل خادم الويب المدمج في Thread منفصل
     threading.Thread(target=run_web_server, daemon=True).start()
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("analyze", analyze_command))
 
-    print("Trading Bot is running successfully with Gemini AI & Built-in Web Server...")
+    print("Trading Bot is running successfully...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
