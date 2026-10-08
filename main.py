@@ -44,13 +44,14 @@ def fetch_market_price(symbol: str) -> dict:
 
     return {"price": 2650.50, "ema20": 2648.10, "rsi": 54.2, "symbol": clean_symbol}
 
-# --- 4. دالة التحليل المخصصة للسكالبينج ---
+# --- 4. دالة التحليل المخصصة للسكالبينج الأعمق ---
 def get_gemini_analysis(symbol: str, price: float, ema20: float, rsi: float) -> str:
-    # حسابات مخصصة للسكالبينج اللحظي السريع
     price = round(price, 2)
-    stop_distance = 2.50  # ستوب قريب بقيمة 25 نقطة (2.5 دولار)
-    tp1_distance = 2.00   # هدف أول سريع بقيمة 20 نقطة
-    tp2_distance = 4.50   # هدف ثاني بقيمة 45 نقطة
+    
+    # توسيع نطاق الأهداف والستوب (مخصصة لسكالبينج الذهب المتوازن)
+    stop_distance = 5.00   # ستوب 50 نقطة (5 دولار)
+    tp1_distance = 6.00    # هدف أول 60 نقطة (6 دولار)
+    tp2_distance = 12.00   # هدف ثاني 120 نقطة (12 دولار)
 
     trend = "BUY" if price > ema20 and rsi > 50 else "SELL"
 
@@ -85,7 +86,7 @@ def get_gemini_analysis(symbol: str, price: float, ema20: float, rsi: float) -> 
 - EMA 20: {ema20}
 - RSI (14): {rsi}
 
-المطلوب: تقديم صفقة سكالبينج سريعة بوقف خسارة قريب جداً (حوالي 2 إلى 3 دولار) وأهداف سريعة.
+المطلوب: تقديم صفقة سكالبينج متوازنة بوقف خسارة متوازن (حوالي 5 دولار) وأهداف ممتازة (6 إلى 12 دولار).
 
 نسق الإجابة بنفس الشكل تماماً:
 🎯 **تأكيد صفقة بالذكاء الاصطناعي ({symbol})**
@@ -115,7 +116,6 @@ def get_gemini_analysis(symbol: str, price: float, ema20: float, rsi: float) -> 
     except Exception as e:
         print(f"Gemini API Error: {e}")
 
-    # التراجع التلقائي للتحليل المحلي السريع للسكالبينج
     return f"""🎯 **تأكيد صفقة بالذكاء الاصطناعي ({symbol})**
 ────────────────
 📌 **الاتجاه:** {trend}
@@ -127,7 +127,7 @@ def get_gemini_analysis(symbol: str, price: float, ema20: float, rsi: float) -> 
 🛑 **SL:** {sl}
 
 💡 **تحليل السكالبينج اللحظي:**
-إشارة {trend} سريعة بناءً على حركة السعر الحالية والمؤشرات اللحظية."""
+إشارة {trend} بناءً على حركة السعر الحالية والمؤشرات اللحظية."""
 
 # --- 5. أوامر بوت التلغرام ---
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -136,7 +136,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         symbol = context.args[0] if context.args else "GOLD"
-        msg = await update.message.reply_text(f"🔄 جاري جلب السعر وتحليل {symbol} للسكالبينج...")
+        msg = await update.message.reply_text(f"🔄 جاري جلب السعر وتحليل {symbol}...")
         
         data = fetch_market_price(symbol)
         result = get_gemini_analysis(data["symbol"], data["price"], data["ema20"], data["rsi"])
