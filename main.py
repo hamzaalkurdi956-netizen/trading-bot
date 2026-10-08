@@ -1,11 +1,12 @@
 import os
 import threading
 import requests
+import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# --- 1. خادم ويب لتلبية متطلبات Render ---
+# --- 1. خادم ويب لتلبية متطلبات Render ومعالجة الخمول ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -21,9 +22,14 @@ def start_health_server():
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
     server.serve_forever()
 
-# --- 2. الإعدادات ومتغيرات البيئة ---
+# --- 2. الإعدادات والمتغيرات ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+
+# إعدادات مسافات السكالبينج بالدولار (يمكن تعديلها هنا مباشرة حسب رغبتك)
+STOP_LOSS_USD = 5.00   # وقف الخسارة: 5 دولار (50 نقطة)
+TP1_USD = 6.00         # الهدف الأول: 6 دولار (60 نقطة)
+TP2_USD = 12.00        # الهدف الثاني: 12 دولار (120 نقطة)
 
 # --- 3. جلب الأسعار المباشرة ---
 def fetch_market_price(symbol: str) -> dict:
@@ -44,25 +50,19 @@ def fetch_market_price(symbol: str) -> dict:
 
     return {"price": 2650.50, "ema20": 2648.10, "rsi": 54.2, "symbol": clean_symbol}
 
-# --- 4. دالة التحليل المخصصة للسكالبينج الأعمق ---
+# --- 4. محرك التحليل وحسابات السكالبينج ---
 def get_gemini_analysis(symbol: str, price: float, ema20: float, rsi: float) -> str:
     price = round(price, 2)
-    
-    # توسيع نطاق الأهداف والستوب (مخصصة لسكالبينج الذهب المتوازن)
-    stop_distance = 5.00   # ستوب 50 نقطة (5 دولار)
-    tp1_distance = 6.00    # هدف أول 60 نقطة (6 دولار)
-    tp2_distance = 12.00   # هدف ثاني 120 نقطة (12 دولار)
-
     trend = "BUY" if price > ema20 and rsi > 50 else "SELL"
 
     if trend == "BUY":
-        tp1 = round(price + tp1_distance, 2)
-        tp2 = round(price + tp2_distance, 2)
-        sl = round(price - stop_distance, 2)
+        tp1 = round(price + TP1_USD, 2)
+        tp2 = round(price + TP2_USD, 2)
+        sl = round(price - STOP_LOSS_USD, 2)
     else:
-        tp1 = round(price - tp1_distance, 2)
-        tp2 = round(price - tp2_distance, 2)
-        sl = round(price + stop_distance, 2)
+        tp1 = round(price - TP1_USD, 2)
+        tp2 = round(price - TP2_USD, 2)
+        sl = round(price + STOP_LOSS_USD, 2)
 
     if not GEMINI_API_KEY:
         return f"""🎯 **تأكيد صفقة بالذكاء الاصطناعي ({symbol})**
@@ -80,18 +80,22 @@ def get_gemini_analysis(symbol: str, price: float, ema20: float, rsi: float) -> 
 
     prompt_text = f"""
 أنت خبير تداول سكالبينج محترف على الذهب.
-لديك البيانات الحقيقية التالية للسوق الآن:
+بيانات السوق الآن:
 - الأصل: {symbol}
 - السعر المباشر: {price}
 - EMA 20: {ema20}
-- RSI (14): {rsi}
+- RSI: {rsi}
 
-المطلوب: تقديم صفقة سكالبينج متوازنة بوقف خسارة متوازن (حوالي 5 دولار) وأهداف ممتازة (6 إلى 12 دولار).
+قدم تحليلاً موجزاً جداً للصفقة التالية:
+الاتجاه: {trend}
+TP1: {tp1}
+TP2: {tp2}
+SL: {sl}
 
 نسق الإجابة بنفس الشكل تماماً:
 🎯 **تأكيد صفقة بالذكاء الاصطناعي ({symbol})**
 ────────────────
-📌 **الاتجاه:** [BUY / SELL / WAIT]
+📌 **الاتجاه:** {trend}
 💵 **السعر الحالي:** {price}
 📊 **RSI:** {rsi} | **EMA20:** {ema20}
 
@@ -100,7 +104,7 @@ def get_gemini_analysis(symbol: str, price: float, ema20: float, rsi: float) -> 
 🛑 **SL:** {sl}
 
 💡 **تحليل Gemini للسكالبينج:**
-[سبب فني مختصر جداً للسكالبينج]
+[سبب فني مختصر في سطرين فقط]
 """
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
@@ -129,7 +133,7 @@ def get_gemini_analysis(symbol: str, price: float, ema20: float, rsi: float) -> 
 💡 **تحليل السكالبينج اللحظي:**
 إشارة {trend} بناءً على حركة السعر الحالية والمؤشرات اللحظية."""
 
-# --- 5. أوامر بوت التلغرام ---
+# --- 5. أوامر البوت ---
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 أهلاً بك! أرسل `/analyze GOLD` للتحليل المباشر.", parse_mode="Markdown")
 
@@ -145,7 +149,7 @@ async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"حدث خطأ: {e}")
 
-# --- 6. تشغيل التطبيق ---
+# --- 6. التشغيل الرئيسي ---
 if __name__ == "__main__":
     if not TELEGRAM_TOKEN:
         print("CRITICAL: TELEGRAM_BOT_TOKEN is missing!")
