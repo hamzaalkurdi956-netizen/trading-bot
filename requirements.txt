@@ -1,4 +1,4 @@
+google-genai
 python-telegram-bot
 yfinance
-google-genai
 requests
