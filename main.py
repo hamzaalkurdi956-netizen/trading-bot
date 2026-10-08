@@ -6,7 +6,7 @@ from google import genai
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# --- 1. خادم ويب مدمج لتجاوز قيود Render ---
+# --- 1. خادم ويب مدمج لتجاوز قيود Render ومنع السقوط (Timed Out) ---
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -15,18 +15,18 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"Trading Bot is Live!")
 
     def log_message(self, format, *args):
-        return
+        return  # إخفاء سجلات الـ HTTP لعدم إزعاج السجلات الرئيسية
 
 def run_web_server():
     port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
     server.serve_forever()
 
-# --- 2. جلب المفاتيح من متغيرات البيئة ---
+# --- 2. ضبط التوكن والمفاتيح (تم دمج التوكن الجديد هنا كقيمة افتراضية) ---
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8918068542:AAGxJ7qge_HSdOwJNmOhZ8OVbH6NlYklE50")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
-# --- 3. دالة جلب السعر اللحظي ---
+# --- 3. دالة جلب السعر اللحظي للسوق ---
 def get_realtime_market_data(symbol: str):
     clean_symbol = symbol.upper().replace("USD", "").replace("GOLD", "XAU")
     try:
@@ -45,10 +45,10 @@ def get_realtime_market_data(symbol: str):
 
     return {"price": 2650.50, "ema20": 2648.10, "rsi": 54.2, "symbol": "XAU/USD"}
 
-# --- 4. دالة التحليل بواسطة Gemini ---
+# --- 4. دالة التحليل بواسطة Gemini AI ---
 def analyze_with_gemini(symbol: str, price: float, ema20: float, rsi: float) -> str:
     if not GEMINI_API_KEY:
-        return "⚠️ خطأ: لم يتم ضبط GEMINI_API_KEY في Render."
+        return "⚠️ خطأ: لم يتم ضبط GEMINI_API_KEY في متغيرات البيئة (Environment Variables) بـ Render."
 
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
@@ -109,13 +109,14 @@ def main():
         print("Error: TELEGRAM_BOT_TOKEN is missing!")
         return
 
+    # تشغيل خادم الويب في خلفية النظام
     threading.Thread(target=run_web_server, daemon=True).start()
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("analyze", analyze_command))
 
-    print("Trading Bot is running successfully...")
+    print("Trading Bot is running successfully with the new token...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
