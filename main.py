@@ -8,15 +8,10 @@ import threading
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "8918068542:AAHxgD83YEV3HZgRUjNyw1XRSE7iaOUS1_0").strip()
 
-# تنظيف وتصفية قيمة مفتاح Gemini من أي مسافات أو أسطر مخفية
-raw_gemini_key = (
-    os.environ.get("GEMINI_API_KEY") or 
-    os.environ.get("GEMINI_KEY") or 
-    os.environ.get("GEMINI_API") or 
-    os.environ.get("API_KEY") or ""
-)
-# أخذ أول كلمة فقط من المفتاح لمنع أي نصوص زائدة تم نسخها بالخطأ
-GEMINI_API_KEY = raw_gemini_key.strip().split()[0] if raw_gemini_key.strip() else ""
+# ضع مفتاح Gemini الخاص بك هنا مباشرة بين التنصيص إذا أردت ضمان العمل فوراً
+# أو اتركه يقرأ من Render تلقائياً
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_KEY") or "اكتب_مفتاح_GEMINI_هنا"
+GEMINI_API_KEY = GEMINI_API_KEY.strip()
 
 def fetch_chart_data(symbol):
     """جلب بيانات حركة الشارت والأسعار التاريخية للرمز"""
@@ -80,7 +75,7 @@ def analyze_with_ai(symbol, price, closes):
     ema = calculate_ema(closes)
     recent_closes = [round(c, 2) for c in closes[-5:]] if closes else [price]
 
-    if not GEMINI_API_KEY:
+    if not GEMINI_API_KEY or "اكتب_مفتاح" in GEMINI_API_KEY:
         return fallback_analysis(symbol, price, ema, rsi)
 
     prompt = (
@@ -99,8 +94,7 @@ def analyze_with_ai(symbol, price, closes):
         f"💡 التبرير الفني: [شرح ملخص بناءً على الحركة]"
     )
 
-    clean_key = urllib.parse.quote(GEMINI_API_KEY)
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={clean_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
     payload = json.dumps({"contents": [{"parts": [{"text": prompt}]}]}).encode('utf-8')
 
     try:
