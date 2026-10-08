@@ -82,7 +82,7 @@ async def analyze_with_gemini(symbol: str, price: float, ema20: float, rsi: floa
         response = await loop.run_in_executor(
             None, 
             lambda: client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-3.8-flash",
                 contents=prompt,
             )
         )
