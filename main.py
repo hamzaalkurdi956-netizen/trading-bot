@@ -5,9 +5,13 @@ import urllib.request
 import urllib.parse
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
+from google import genai
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "8918068542:AAHxgD83YEV3HZgRUjNyw1XRSE7iaOUS1_0").strip()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+
+# تهيئة العميل الرسمي لـ Gemini
+client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 def fetch_chart_data(symbol):
     """جلب بيانات حركة الشارت والأسعار التاريخية للرمز"""
@@ -66,45 +70,48 @@ def calculate_ema(closes, period=20):
     return round(ema, 2)
 
 def analyze_with_ai(symbol, price, closes):
-    """تحليل الحركة الفنية عبر الربط المباشر مع Gemini"""
+    """تحليل الحركة الفنية بالاعتماد على SDK الذكاء الاصطناعي الرسمي"""
     rsi = calculate_rsi(closes)
     ema = calculate_ema(closes)
     recent_closes = [round(c, 2) for c in closes[-5:]] if closes else [price]
 
-    if not GEMINI_API_KEY:
+    if not client:
         return fallback_analysis(symbol, price, ema, rsi)
 
     prompt = (
-        f"أنت خبير تداول وخبير استراتيجيات السكالبينج.\n"
-        f"قم بتحليل توصية لـ {symbol.upper()}.\n"
+        f"أنت خبير تداول واستراتيجيات السكالبينج الاحترافية.\n"
+        f"قم بتحليل صفقة سكالبينج لـ {symbol.upper()}.\n"
         f"السعر الحالي: {price}\n"
         f"EMA20: {ema}\n"
         f"RSI14: {rsi}\n"
         f"آخر إغلاقات: {recent_closes}\n\n"
-        f"اعطني تحليلاً شاملاً باللغة العربية بنفس الهيكل التالي ودون استخدام أي رموز Markdown مثل النجوم (*):\n"
+        f"اكتب التحليل باللغة العربية بنفس الهيكل وبدون استخدام أي رموز Markdown مثل النجوم (*):\n"
         f"📌 الاتجاه: (BUY أو SELL)\n"
         f"💵 سعر الدخول: {price}\n"
         f"🛑 وقف الخسارة (SL): [القيمة]\n"
         f"🎯 الهدف الأول (TP1): [القيمة]\n"
         f"🎯 الهدف الثاني (TP2): [القيمة]\n"
         f"📊 المؤشرات: RSI {rsi} | EMA20 {ema}\n"
-        f"💡 التبرير الفني والتحليل: [شرح تفصيلي ملخص لبنية السوق ورأي الذكاء الاصطناعي]"
+        f"💡 التبرير الفني: [شرح ملخص لبنية السوق]"
     )
 
-    clean_key = urllib.parse.quote(GEMINI_API_KEY)
-    # استخدام نموذج gemini-1.5-flash المستقر والمعتمد
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={clean_key}"
-    payload = json.dumps({"contents": [{"parts": [{"text": prompt}]}]}).encode('utf-8')
-
     try:
-        req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
-        with urllib.request.urlopen(req, timeout=12) as response:
-            res_data = json.loads(response.read().decode())
-            ai_text = res_data['candidates'][0]['content']['parts'][0]['text']
-            return f"🧠 تحليل الذكاء الاصطناعي ({symbol.upper()})\n━━━━━━━━━━━━━━━━━━━\n" + ai_text
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+        )
+        return f"🧠 تحليل الذكاء الاصطناعي ({symbol.upper()})\n━━━━━━━━━━━━━━━━━━━\n" + response.text
     except Exception as e:
-        print(f"Gemini Error: {e}")
-        return fallback_analysis(symbol, price, ema, rsi)
+        print(f"Gemini SDK Exception Error: {e}")
+        try:
+            response = client.models.generate_content(
+                model='gemini-1.5-flash',
+                contents=prompt,
+            )
+            return f"🧠 تحليل الذكاء الاصطناعي ({symbol.upper()})\n━━━━━━━━━━━━━━━━━━━\n" + response.text
+        except Exception as ex:
+            print(f"Fallback Model Exception: {ex}")
+            return fallback_analysis(symbol, price, ema, rsi)
 
 def fallback_analysis(symbol, price, ema, rsi):
     action = "شراء (BUY) 🟢" if price > ema else "بيع (SELL) 🔴"
