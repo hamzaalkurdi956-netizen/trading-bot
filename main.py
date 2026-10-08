@@ -78,7 +78,7 @@ def analyze_with_gemini(symbol: str, price: float, ema20: float, rsi: float) -> 
 [السبب الفني]
 """
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.8-flash",
             contents=prompt,
         )
         return response.text
