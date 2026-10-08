@@ -75,25 +75,25 @@ def analyze_with_ai(symbol, price, closes):
         return fallback_analysis(symbol, price, ema, rsi)
 
     prompt = (
-        f"أنت خبير تداول واستراتيجيات السكالبينج الاحترافية.\n"
-        f"قم بتحليل صفقة سكالبينج لـ {symbol.upper()}.\n"
+        f"أنت خبير تداول وخبير استراتيجيات السكالبينج.\n"
+        f"قم بتحليل توصية لـ {symbol.upper()}.\n"
         f"السعر الحالي: {price}\n"
         f"EMA20: {ema}\n"
         f"RSI14: {rsi}\n"
         f"آخر إغلاقات: {recent_closes}\n\n"
-        f"اكتب النتيجة بالعربية بنفس الهيكل وبدون استخدام أي رموز Markdown مثل النجوم (*):\n"
+        f"اعطني تحليلاً شاملاً باللغة العربية بنفس الهيكل التالي ودون استخدام أي رموز Markdown مثل النجوم (*):\n"
         f"📌 الاتجاه: (BUY أو SELL)\n"
         f"💵 سعر الدخول: {price}\n"
         f"🛑 وقف الخسارة (SL): [القيمة]\n"
         f"🎯 الهدف الأول (TP1): [القيمة]\n"
         f"🎯 الهدف الثاني (TP2): [القيمة]\n"
         f"📊 المؤشرات: RSI {rsi} | EMA20 {ema}\n"
-        f"💡 التبرير الفني: [شرح ملخص بناءً على الحركة]"
+        f"💡 التبرير الفني والتحليل: [شرح تفصيلي ملخص لبنية السوق ورأي الذكاء الاصطناعي]"
     )
 
     clean_key = urllib.parse.quote(GEMINI_API_KEY)
-    # تم التحديث إلى النموذج الجديد المعتمَد gemini-2.5-flash
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={clean_key}"
+    # استخدام نموذج gemini-1.5-flash المستقر والمعتمد
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={clean_key}"
     payload = json.dumps({"contents": [{"parts": [{"text": prompt}]}]}).encode('utf-8')
 
     try:
