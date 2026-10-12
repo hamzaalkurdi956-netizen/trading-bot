@@ -37,7 +37,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")  
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5-5")
 
-VERSION = "v10-ultimate-institutional"
+VERSION = "v10.1-ultimate-institutional"
 MIN_RR = 1.5          
 MAX_RISK_ATR = 3.0    
 MAX_SL_POINTS = 40.0  
@@ -78,7 +78,6 @@ def init_db():
                 value REAL
             )
         """)
-        # جدول محفظة التداول التجريبي (Paper Trading)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS paper_account (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -159,7 +158,6 @@ def _good(candles):
 
 
 def fetch_market_data():
-    # جلب بيانات الذهب ومؤشر الدولار DXY للتأكيد
     ltf = _binance_klines("PAXGUSDT", "15m", 150) or _yahoo_klines("GC=F", "15m", "5d")
     h1 = _binance_klines("PAXGUSDT", "1h", 500) or _yahoo_klines("GC=F", "60m", "3mo")
     d1 = _binance_klines("PAXGUSDT", "1d", 200) or _yahoo_klines("GC=F", "1d", "1y")
@@ -173,7 +171,6 @@ def fetch_market_data():
     h4 = resample(h1, 4)[-120:]
     price = ltf[-1]["c"]
 
-    # حساب اتجاه مؤشر الدولار قصير المدى للفلتر العكسي
     dxy_trend = "NEUTRAL"
     if dxy_candles and len(dxy_candles) > 10:
         dxy_diff = dxy_candles[-1]["c"] - dxy_candles[-6]["c"]
@@ -231,21 +228,6 @@ def structure(candles):
     return "RANGE", highs, lows
 
 
-def calc_gann_levels(price):
-    if price <= 0:
-        return [], []
-    root = price ** 0.5
-    steps = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0]
-    supports, resistances = [], []
-    for s in steps:
-        sup = (root - s) ** 2
-        if sup > 0:
-            supports.append(round(sup, 2))
-        res = (root + s) ** 2
-        resistances.append(round(res, 2))
-    return sorted(supports, reverse=True), sorted(resistances)
-
-
 def find_fvgs(candles, lookback=40):
     res = []
     start = max(2, len(candles) - lookback)
@@ -298,7 +280,6 @@ def smc_signal(data: dict) -> dict:
     elif price > ema50: bias = "BUY"
     else: bias = "SELL"
 
-    # فلتر مؤشر الدولار DXY (الذهب يتحرك عكس الدولار غالباً)
     if data["dxy_trend"] == "BULL" and bias == "BUY":
         return {"dir": "WAIT", "why": "تعارض مع مؤشر الدولار (DXY صاعد والذهب شراء).", "facts": facts}
     if data["dxy_trend"] == "BEAR" and bias == "SELL":
@@ -426,7 +407,7 @@ def update_outcomes(candles):
                         final_r = 0.0 if (buy and s["sl"] >= s["entry"] or not buy and s["sl"] <= s["entry"]) else -1.0
                         res = "BE" if final_r == 0.0 else "SL"
                         cur.execute("UPDATE signals SET status = 'closed', result = ?, r = ? WHERE id = ?", (res, final_r, s["id"]))
-                        update_paper_balance(final_r * 100) # افتراض 100$ لكل 1R في التداول التجريبي
+                        update_paper_balance(final_r * 100)
                         s_dict = dict(s)
                         s_dict.update({"status": "closed", "result": res, "r": final_r})
                         closed.append(s_dict)
@@ -455,7 +436,7 @@ def stats_digest():
         f"📈 إجمالي الصفقات المغلقة: {len(done)}",
         f"✅ صفقات رابحة: {len(wins)} | ❌ صفقات خاسرة: {len(done) - len(wins)}",
         f"🎯 نسبة النجاح: {(len(wins)/len(done)*100) if done else 0:.1f}%",
-        f"🚀 النسخة: {VERSION} (مفعل بالكامل)"
+        f"🚀 النسخة: {VERSION}"
     ]
     return "\n".join(lines)
 
@@ -498,8 +479,8 @@ def scanner_loop():
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🚀 بوت التداول المؤسسي الشامل (v10)\n\n"
-        "/analyze - تحليل فوري مع فلتر DXY\n"
+        "🚀 بوت التداول المؤسسي الشامل (v10.1)\n\n"
+        "/analyze - تحليل فوري مع الأسعار والأهداف الكاملة\n"
         "/subscribe - تلقي التنبيهات\n"
         "/stats - تقرير الأداء والمحفظة التجريبية\n"
         "/pause 60 - إيقاف مؤقت\n"
@@ -509,13 +490,38 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        msg = await update.message.reply_text("🔍 جاري الفحص المؤسسي (ICT KillZones + DXY + Gann)...")
+        msg = await update.message.reply_text("🔍 جاري الفحص المؤسسي واستخراج الأهداف...")
         data = fetch_market_data()
         if not data:
             await msg.edit_text("❌ تعذّر جلب بيانات السوق.")
             return
         sig = smc_signal(data)
-        await msg.edit_text(f"🎯 تحليل السوق:\nاتجاه الذهب: {sig['dir']}\nمؤشر الدولار DXY: {data['dxy_trend']}\nالسبب: {sig['why']}")
+        
+        lines = [
+            f"🎯 تحليل ICT KillZones + DXY ({data['symbol']})",
+            "────────────────────────",
+            f"📌 الاتجاه: {sig['dir']}",
+            f"💵 السعر الحالي: {data['price']}",
+            f"🌐 مؤشر الدولار DXY: {data['dxy_trend']}"
+        ]
+        
+        if sig['dir'] in ("BUY", "SELL"):
+            lines += [
+                f"📍 الدخول: {sig['entry']} ({sig.get('mode', '')})",
+                f"🎯 TP1: {sig['tp1']}",
+                f"🎯 TP2: {sig['tp2']}",
+                f"🛑 SL: {sig['sl']}",
+                f"⚖️ R:R: 1:{sig['rr']}"
+            ]
+        
+        lines += [
+            "",
+            f"💡 السبب: {sig['why']}",
+            "",
+            f"🔖 النسخة: {VERSION}"
+        ]
+        
+        await msg.edit_text("\n".join(lines))
     except Exception as e:
         await update.message.reply_text(f"خطأ: {e}")
 
@@ -559,5 +565,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("pause", pause_cmd))
     app.add_handler(CommandHandler("resume", resume_cmd))
 
-    print("Smart ICT Ultimate Institutional Bot is running...")
+    print("Smart ICT Ultimate Institutional Bot v10.1 is running...")
     app.run_polling(drop_pending_updates=True)
