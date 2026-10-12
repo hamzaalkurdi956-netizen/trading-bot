@@ -8,7 +8,7 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # =====================================================
-‎# 1. خادم الويب (Keep-Alive)
+# (section)
 # =====================================================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -27,7 +27,7 @@ def start_health_server():
 
 
 # =====================================================
-‎# 2. الإعدادات
+# (section)
 # =====================================================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")        # اختياري: مراجع ثانٍ
@@ -39,7 +39,7 @@ MAX_RISK_ATR = 3.0    # أقصى حجم للستوب بوحدات ATR
 
 
 # =====================================================
-‎# 3. جلب البيانات الحقيقية (بدون أي سعر وهمي)
+# (section)
 # =====================================================
 def _binance_klines(interval: str, limit: int = 150):
     for host in ("https://api.binance.com", "https://api.binance.us"):
@@ -88,7 +88,7 @@ def fetch_market_data():
     try:
         p = requests.get("https://api.gold-api.com/price/XAU", timeout=4).json()
         live = float(p.get("price", 0))
-‎        # نقبل السعر المباشر فقط إذا كان قريباً من الشموع (فرق < 1.5%)
+        # (section)
         if live > 0 and abs(live - price) / price < 0.015:
             price = round(live, 2)
     except Exception as e:
@@ -98,7 +98,7 @@ def fetch_market_data():
 
 
 # =====================================================
-‎# 4. المؤشرات وهيكل السوق (حسابات حتمية)
+# (section)
 # =====================================================
 def atr(candles, n=14):
     trs = []
@@ -117,7 +117,7 @@ def ema(values, n):
 
 
 def swings(candles, k=2):
-‎    """قمم وقيعان محورية (Fractals). تُرجع قوائم (index, price)."""
+    """قمم وقيعان محورية (Fractals). تُرجع قوائم (index, price)."""
     highs, lows = [], []
     for i in range(k, len(candles) - k):
         w = candles[i - k : i + k + 1]
@@ -145,7 +145,7 @@ def structure(candles):
 
 
 def find_fvgs(candles, lookback=40):
-‎    """فجوات القيمة العادلة غير المملوءة."""
+    """فجوات القيمة العادلة غير المملوءة."""
     res = []
     start = max(2, len(candles) - lookback)
     for i in range(start, len(candles)):
@@ -163,7 +163,7 @@ def find_fvgs(candles, lookback=40):
 
 
 def find_order_blocks(candles, a, lookback=40):
-‎    """آخر شمعة معاكسة قبل اندفاع قوي، غير مخترقة."""
+    """آخر شمعة معاكسة قبل اندفاع قوي، غير مخترقة."""
     res = []
     start = max(1, len(candles) - lookback)
     for i in range(start, len(candles) - 1):
@@ -179,7 +179,7 @@ def find_order_blocks(candles, a, lookback=40):
 
 
 # =====================================================
-‎# 5. محرك الإشارة (قواعد ICT/SMC صارمة)
+# (section)
 # =====================================================
 def build_signal(data: dict) -> dict:
     ltf, htf, price = data["ltf"], data["htf"], data["price"]
@@ -220,7 +220,7 @@ def build_signal(data: dict) -> dict:
             "facts": facts,
         }
 
-‎    # منطقة دخول: يجب أن يكون السعر داخلها أو ضمن 0.5 ATR منها
+    # (section)
     cands = [
         z for z in zones
         if z["type"] == direction and z["low"] - 0.5 * a <= price <= z["high"] + 0.5 * a
@@ -263,7 +263,7 @@ def build_signal(data: dict) -> dict:
 
 
 # =====================================================
-‎# 6. المراجعة والتأكيد (Claude + Gemini) - لا يمكنهم تغيير المستويات، فقط الموافقة أو الرفض
+# (section)
 # =====================================================
 def _review_prompt(data, sig):
     recent = "\n".join(
@@ -329,7 +329,7 @@ def review_with_gemini(data, sig):
 
 
 def finalize(data, sig):
-‎    """يطبق الفيتو: أي مراجع يرفض الصفقة => WAIT."""
+    """يطبق الفيتو: أي مراجع يرفض الصفقة => WAIT."""
     notes = []
     if sig["dir"] in ("BUY", "SELL"):
         for name, fn in (("Claude", review_with_claude), ("Gemini", review_with_gemini)):
@@ -347,7 +347,7 @@ def finalize(data, sig):
 
 
 # =====================================================
-‎# 7. تنسيق الرسالة
+# (section)
 # =====================================================
 def format_message(data, sig, notes):
     f = sig["facts"]
@@ -380,14 +380,14 @@ def format_message(data, sig, notes):
 
 
 # =====================================================
-‎# 8. أوامر تلغرام
+# (section)
 # =====================================================
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-‎        "🧠 أهلاً بك في بوت التحليل (ICT & SMC)\n\n"
-‎        "البوت يحسب الهيكل والسيولة وOrder Blocks وFVG من شموع حقيقية، "
-‎        "ثم يراجع الصفقة عبر Claude/Gemini قبل إرسالها.\n\n"
-‎        "للتحليل: /analyze GOLD"
+        "🧠 أهلاً بك في بوت التحليل (ICT & SMC)\n\n"
+        "البوت يحسب الهيكل والسيولة وOrder Blocks وFVG من شموع حقيقية، "
+        "ثم يراجع الصفقة عبر Claude/Gemini قبل إرسالها.\n\n"
+        "للتحليل: /analyze GOLD"
     )
 
 
@@ -406,7 +406,7 @@ async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =====================================================
-‎# 9. التشغيل
+# (section)
 # =====================================================
 if __name__ == "__main__":
     if not TELEGRAM_TOKEN:
