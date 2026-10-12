@@ -34,7 +34,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")        # اختياري: مر�
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")  # اختياري: تأكيد Claude
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5-5")
 
-VERSION = "v3-relaxed"
+VERSION = "v4-ema-bias"
 MIN_RR = 1.5          # أقل نسبة ربح/خسارة مقبولة للصفقة
 MAX_RISK_ATR = 3.0    # أقصى حجم للستوب بوحدات ATR
 
@@ -182,6 +182,24 @@ def find_order_blocks(candles, a, lookback=40):
 # =====================================================
 # (section)
 # =====================================================
+def watch_levels(data: dict) -> list:
+    """When the answer is WAIT: nearest unfilled buy zone below price and sell zone above price."""
+    ltf, price = data["ltf"], data["price"]
+    a = atr(ltf)
+    zones = find_fvgs(ltf, 80) + find_order_blocks(ltf, a, 80)
+    buys = [z for z in zones if z["type"] == "BUY" and z["high"] <= price]
+    sells = [z for z in zones if z["type"] == "SELL" and z["low"] >= price]
+    out = []
+    if buys:
+        z = max(buys, key=lambda x: x["high"])
+        out.append(f'👀 BUY عند: {z["kind"]} {round(z["low"], 2)}-{round(z["high"], 2)}')
+    if sells:
+        z = min(sells, key=lambda x: x["low"])
+        out.append(f'👀 SELL عند: {z["kind"]} {round(z["low"], 2)}-{round(z["high"], 2)}')
+    return out
+
+
+# =====================================================
 def build_signal(data: dict) -> dict:
     ltf, htf, price = data["ltf"], data["htf"], data["price"]
     a = atr(ltf)
@@ -214,6 +232,10 @@ def build_signal(data: dict) -> dict:
         bias = "BUY"
     elif price < ema50 and ltf_struct == "BEAR":
         bias = "SELL"
+    elif price < ema50 - 1.0 * atr(htf):
+        bias = "SELL"   # السعر تحت EMA50 بمسافة واضحة على الساعة
+    elif price > ema50 + 1.0 * atr(htf):
+        bias = "BUY"
     else:
         return {"dir": "WAIT", "why": "الاتجاه العام غير واضح (الساعة متذبذبة ولا يوجد تأكيد من EMA50 وهيكل 15m).", "facts": facts}
 
@@ -227,7 +249,7 @@ def build_signal(data: dict) -> dict:
             return 0
         return (z["low"] - price) if price < z["low"] else (price - z["high"])
 
-    near = [z for z in zones if dist(z) <= 2 * a]
+    near = [z for z in zones if dist(z) <= 3 * a]
     if not near:
         return {"dir": "WAIT", "why": f"الاتجاه {bias} لكن لا توجد منطقة OB/FVG غير مملوءة قريبة من السعر.", "facts": facts}
 
@@ -403,6 +425,8 @@ async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         sig = build_signal(data)
         sig, notes = finalize(data, sig)
+        if sig["dir"] == "WAIT":
+            notes = watch_levels(data) + notes
         await msg.edit_text(format_message(data, sig, notes))
     except Exception as e:
         await update.message.reply_text(f"حدث خطأ: {e}")
