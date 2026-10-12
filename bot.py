@@ -18,7 +18,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"Smart ICT/SMC + Gann Bot is running!")
+        self.wfile.write(b"Smart ICT/SMC + Gann + KillZones Bot is running!")
 
     def log_message(self, format, *args):
         return
@@ -37,7 +37,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")  
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5-5")
 
-VERSION = "v8.1-pro-gann"
+VERSION = "v9-pro-killzones"
 MIN_RR = 1.5          
 MAX_RISK_ATR = 3.0    
 MAX_SL_POINTS = 40.0  # أقصى مسافة مسموحة لوقف الخسارة بالنقاط
@@ -198,7 +198,7 @@ def fetch_market_data():
 
 
 # =====================================================
-# Technical Indicators & Analysis (Including Gann Square of 9)
+# Technical Indicators & Analysis (ICT / SMC / Gann)
 # =====================================================
 def atr(candles, n=14):
     trs = []
@@ -631,6 +631,38 @@ def set_paused_until(val):
         conn.commit()
 
 
+def session_ok(dt):
+    """فلتر فترات الـ Kill Zones الحصرية لـ ICT (بتوقيت UTC):
+    - افتتاح لندن: 07:00 إلى 10:00 UTC
+    - افتتاح نيويورك: 12:00 إلى 15:00 UTC
+    - إغلاق لندن: 15:00 إلى 17:00 UTC
+    """
+    wd, h, m = dt.weekday(), dt.hour, dt.minute
+    total_minutes = h * 60 + m
+
+    if wd >= 5:
+        return False, "السوق مغلق (عطلة نهاية الأسبوع)"
+
+    london_open = (7 * 60 <= total_minutes <= 10 * 60)
+    ny_open = (12 * 60 <= total_minutes <= 15 * 60)
+    london_close = (15 * 60 <= total_minutes <= 17 * 60)
+
+    if london_open or ny_open or london_close:
+        return True, ""
+
+    return False, "خارج فترات الـ Kill Zones (سيولة ضعيفة / تذبذب)"
+
+
+def blocked_reason(now=None):
+    now = now or _dt.datetime.now(_dt.timezone.utc)
+    if get_paused_until() > time.time():
+        return "البوت في وضع إيقاف مؤقت"
+    ok, why = session_ok(now)
+    if not ok:
+        return why
+    return None
+
+
 def active_signal(direction):
     with _lock:
         with sqlite3.connect(DB_FILE) as conn:
@@ -651,7 +683,7 @@ def record_signal(sig, data):
         return ex, False
     with _lock:
         with sqlite3.connect(DB_FILE) as conn:
-            conn.row_factory = sqlite3.Row  # <--- حل مشكلة الخطأ البرمجي هنا
+            conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             last = data["ltf"][-1].get("t") or int(time.time() * 1000)
             limit = "Limit" in sig.get("mode", "")
@@ -748,7 +780,7 @@ def stats_text():
         return "📊 لا توجد صفقات مسجلة بعد."
     wins = [s for s in done if s["r"] > 0]
     losses = [s for s in done if s["r"] < 0]
-    lines = ["📊 إحصائيات الصفقات (Gann + SQLite)", "────────────────",
+    lines = ["📊 إحصائيات الصفقات (KillZones + Gann)", "────────────────",
              f"المسجلة: {len(sigs)} | المفتوحة: {len(active)} | المغلقة: {len(done)}"]
     if done:
         gp = sum(s["r"] for s in wins)
@@ -794,7 +826,7 @@ def scan_once():
         return
     for s in update_outcomes(data["ltf"]):
         broadcast(result_text(s))
-    if get_paused_until() > time.time():
+    if blocked_reason():
         return
     sig = build_signal(data)
     if sig["dir"] not in ("BUY", "SELL") or active_signal(sig["dir"]):
@@ -817,7 +849,7 @@ def scanner_loop():
 def format_message(data, sig, notes):
     f = sig["facts"]
     lines = [
-        f'🎯 تحليل ICT/SMC + Gann ({data["symbol"]})',
+        f'🎯 تحليل ICT KillZones + Gann ({data["symbol"]})',
         "────────────────",
         f'📌 الاتجاه: {sig["dir"]}',
         f'💵 السعر الحالي: {data["price"]}',
@@ -838,14 +870,14 @@ def format_message(data, sig, notes):
             lines.append(f'{arrow} {v["school"]}: {v["vote"]:+.1f}')
     if notes:
         lines += [""] + notes
-    lines += ["", f'🔖 النسخة: {VERSION} | مستويات جان مفعلة']
+    lines += ["", f'🔖 النسخة: {VERSION} | فترات السيولة مفعلة']
     return "\n".join(lines)
 
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🧠 بوت التحليل المتطور (مع مربع جان وسلاسل SQLite)\n\n"
-        "/analyze  تحليل فوري\n"
+        "🧠 بوت التداول (مع فترات Kill Zones ومربع جان)\n\n"
+        "/analyze  تحليل فوري (أضف force لتجاوز فلتر الجلسات)\n"
         "/subscribe  اشتراك بالتنبيهات\n"
         "/unsubscribe  إيقاف التنبيهات\n"
         "/stats  إحصائيات الصفقات\n"
@@ -856,7 +888,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        msg = await update.message.reply_text("🔍 جاري فحص السوق ومستويات جان...")
+        force = any(a.lower() == "force" for a in (context.args or []))
+        msg = await update.message.reply_text("🔍 جاري فحص سيولة Kill Zones والسوق...")
         data = fetch_market_data()
         if not data:
             await msg.edit_text("❌ تعذّر جلب البيانات.")
@@ -865,6 +898,11 @@ async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             broadcast(result_text(s))
 
         sig = build_signal(data)
+        if sig["dir"] in ("BUY", "SELL") and not force:
+            why = blocked_reason()
+            if why:
+                sig = {**sig, "dir": "WAIT", "why": f"{why}. (أرسل /analyze force للتجاوز)"}
+
         notes = []
         if sig["dir"] in ("BUY", "SELL"):
             rec, new = record_signal(sig, data)
@@ -883,7 +921,7 @@ async def subscribe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with sqlite3.connect(DB_FILE) as conn:
         conn.execute("INSERT OR IGNORE INTO subscribers (chat_id) VALUES (?)", (cid,))
         conn.commit()
-    await update.message.reply_text("✅ تم الاشتراك بنجاح.")
+    await update.message.reply_text("✅ تم الاشتراك بنجاح واستلام تنبيهات Kill Zones.")
 
 
 async def unsubscribe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -930,5 +968,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("pause", pause_cmd))
     app.add_handler(CommandHandler("resume", resume_cmd))
 
-    print("Smart ICT Bot with Gann Square & SQLite is running...")
+    print("Smart ICT KillZones Bot is running...")
     app.run_polling(drop_pending_updates=True)
