@@ -186,8 +186,7 @@ def build_signal(data: dict) -> dict:
     a = atr(ltf)
 
     htf_struct, _, _ = structure(htf)
-    htf_closes = [c["c"] for c in htf]
-    ema50 = ema(htf_closes[-100:], 50)
+    ema50 = ema([c["c"] for c in htf][-100:], 50)
     ltf_struct, highs, lows = structure(ltf)
 
     facts = {
@@ -197,67 +196,70 @@ def build_signal(data: dict) -> dict:
         "atr15m": round(a, 2),
     }
 
-    if len(highs) < 1 or len(lows) < 1:
-        return {"dir": "WAIT", "why": "لا توجد قمم/قيعان كافية لتحديد هيكل واضح.", "facts": facts}
+    if not highs or not lows:
+        return {"dir": "WAIT", "why": "No swings found to define structure.", "facts": facts}
 
     swing_high, swing_low = highs[-1][1], lows[-1][1]
-    mid = (swing_high + swing_low) / 2
-    zone = "Discount" if price < mid else "Premium"
-    facts.update({"swing_high": swing_high, "swing_low": swing_low, "zone": zone})
+    rng = max(abs(swing_high - swing_low), 0.0001)
+    pos = (price - swing_low) / rng  # 0 = range low, 1 = range high
+    facts.update({"swing_high": swing_high, "swing_low": swing_low,
+                  "zone": "Discount" if pos < 0.5 else "Premium"})
 
-    zones = find_fvgs(ltf) + find_order_blocks(ltf, a)
+    if htf_struct == "BULL":
+        bias = "BUY"
+    elif htf_struct == "BEAR":
+        bias = "SELL"
+    elif price > ema50 and ltf_struct == "BULL":
+        bias = "BUY"
+    elif price < ema50 and ltf_struct == "BEAR":
+        bias = "SELL"
+    else:
+        return {"dir": "WAIT", "why": "الاتجاه العام غير واضح (الساعة متذبذبة ولا يوجد تأكيد من EMA50 وهيكل 15m).", "facts": facts}
 
-    direction = None
-    if htf_struct == "BULL" and price > ema50 and ltf_struct != "BEAR" and zone == "Discount":
-        direction = "BUY"
-    elif htf_struct == "BEAR" and price < ema50 and ltf_struct != "BULL" and zone == "Premium":
-        direction = "SELL"
+    if (bias == "BUY" and pos > 0.65) or (bias == "SELL" and pos < 0.35):
+        return {"dir": "WAIT", "why": f"الاتجاه {bias} لكن السعر بعيد عن منطقة الدخول المناسبة (انتظر تصحيحاً نحو OB/FVG).", "facts": facts}
 
-    if not direction:
-        return {
-            "dir": "WAIT",
-            "why": "لا يوجد توافق بين اتجاه الإطار الأعلى وهيكل 15 دقيقة ومنطقة السعر (Premium/Discount).",
-            "facts": facts,
-        }
+    zones = [z for z in find_fvgs(ltf, 60) + find_order_blocks(ltf, a, 60) if z["type"] == bias]
 
-    # (section)
-    cands = [
-        z for z in zones
-        if z["type"] == direction and z["low"] - 0.5 * a <= price <= z["high"] + 0.5 * a
-    ]
-    if not cands:
-        return {
-            "dir": "WAIT",
-            "why": "الاتجاه واضح لكن السعر ليس عند Order Block أو FVG غير مملوء. لا دخول بدون منطقة.",
-            "facts": facts,
-        }
+    def dist(z):
+        if z["low"] <= price <= z["high"]:
+            return 0
+        return (z["low"] - price) if price < z["low"] else (price - z["high"])
 
-    z = cands[-1]
+    near = [z for z in zones if dist(z) <= 2 * a]
+    if not near:
+        return {"dir": "WAIT", "why": f"الاتجاه {bias} لكن لا توجد منطقة OB/FVG غير مملوءة قريبة من السعر.", "facts": facts}
+
+    z = min(near, key=dist)
     facts["entry_zone"] = f'{z["kind"]} {round(z["low"], 2)}-{round(z["high"], 2)}'
 
-    if direction == "BUY":
-        sl = min(z["low"], swing_low) - 0.3 * a
-        risk = price - sl
-        tp1, tp2 = price + 1.5 * risk, price + 3 * risk
+    if dist(z) == 0:
+        entry, mode = price, "دخول فوري (السعر داخل المنطقة)"
     else:
-        sl = max(z["high"], swing_high) + 0.3 * a
-        risk = sl - price
-        tp1, tp2 = price - 1.5 * risk, price - 3 * risk
+        entry = z["high"] if bias == "BUY" else z["low"]
+        mode = "أمر معلّق Limit عند حافة المنطقة"
+
+    if bias == "BUY":
+        sl = min(z["low"], swing_low if swing_low < entry else z["low"]) - 0.3 * a
+        risk = entry - sl
+        tp1, tp2 = entry + 1.5 * risk, entry + 3 * risk
+    else:
+        sl = max(z["high"], swing_high if swing_high > entry else z["high"]) + 0.3 * a
+        risk = sl - entry
+        tp1, tp2 = entry - 1.5 * risk, entry - 3 * risk
 
     if risk <= 0 or risk > MAX_RISK_ATR * a:
-        return {"dir": "WAIT", "why": "الستوب بعيد جداً مقارنة بالتذبذب؛ نسبة المخاطرة غير مناسبة.", "facts": facts}
+        return {"dir": "WAIT", "why": "الستوب بعيد جداً مقارنة بالتذبذب؛ المخاطرة غير مناسبة.", "facts": facts}
 
     return {
-        "dir": direction,
-        "entry": round(price, 2),
+        "dir": bias,
+        "entry": round(entry, 2),
+        "mode": mode,
         "sl": round(sl, 2),
         "tp1": round(tp1, 2),
         "tp2": round(tp2, 2),
-        "rr": round(abs(tp1 - price) / risk, 2),
-        "why": (
-            f"اتجاه {htf_struct} على 1H، هيكل 15m: {ltf_struct}، السعر في {zone}، "
-            f"عند {facts['entry_zone']}."
-        ),
+        "rr": round(abs(tp1 - entry) / risk, 2),
+        "why": f"اتجاه {htf_struct} على 1H، هيكل 15m: {ltf_struct}، منطقة الدخول {facts['entry_zone']}.",
         "facts": facts,
     }
 
@@ -359,7 +361,7 @@ def format_message(data, sig, notes):
     ]
     if sig["dir"] in ("BUY", "SELL"):
         lines += [
-            f'📍 الدخول: {sig["entry"]}',
+            f'📍 الدخول: {sig["entry"]} ({sig.get("mode", "")})',
             f'🎯 TP1: {sig["tp1"]}',
             f'🎯 TP2: {sig["tp2"]}',
             f'🛑 SL: {sig["sl"]}',
