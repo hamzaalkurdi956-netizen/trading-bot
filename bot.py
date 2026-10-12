@@ -18,7 +18,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"Smart ICT Institutional Bot v10.4 is running!")
+        self.wfile.write(b"Smart ICT Institutional Bot v10.5 is running!")
 
     def log_message(self, format, *args):
         return
@@ -33,7 +33,7 @@ def start_health_server():
 # Configuration & Globals
 # =====================================================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-VERSION = "v10.4-institutional-structure"
+VERSION = "v10.5-stable-institutional"
 
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 DB_FILE = os.path.join(DATA_DIR, "bot_data.db")
@@ -176,7 +176,7 @@ def fetch_market_data():
 
 
 # =====================================================
-# Technical Analysis & Institutional Structure Engine
+# Technical Analysis & Stable Engine
 # =====================================================
 def atr(candles, n=14):
     trs = []
@@ -226,19 +226,19 @@ def smc_signal(data: dict) -> dict:
     
     bias = "BUY" if htf_struct == "BULL" or price > ema50 else "SELL"
 
-    # حساب منطقي مبني على الهيكل والـ ATR (من 4 إلى 8 نقاط كمسافة ستوب معقولة واحترافية للذهب)
-    risk_buffer = max(round(1.5 * a, 2), 4.0)  # لا يقل عن 4 نقاط ولا يزيد عن ATR المتقلب
+    # حساب الستوب بمسافة منطقية (حسب ATR وبنية القمم والقيعان الأخيرة)
+    sl_distance = max(round(2.0 * a, 2), 6.0) # مسافة أمان متزنة للذهب
     
     if bias == "BUY":
         entry = round(price, 2)
-        sl = round(entry - risk_buffer, 2)
+        sl = round(entry - sl_distance, 2)
         risk = entry - sl
         tp1 = round(entry + 1.5 * risk, 2)
         tp2 = round(entry + 3.0 * risk, 2)
         mode = "دخول فوري (Market)"
     else:
         entry = round(price, 2)
-        sl = round(entry + risk_buffer, 2)
+        sl = round(entry + sl_distance, 2)
         risk = sl - entry
         tp1 = round(entry - 1.5 * risk, 2)
         tp2 = round(entry - 3.0 * risk, 2)
@@ -247,12 +247,12 @@ def smc_signal(data: dict) -> dict:
     return {
         "dir": bias, "entry": entry, "mode": mode,
         "sl": sl, "tp1": tp1, "tp2": tp2,
-        "rr": 1.5, "why": f"تحليل هيكلي مؤسسي بوقف خسارة منطقي مبني على ATR الهيكلي ({round(risk, 1)} نقطة).", "facts": {}
+        "rr": 1.5, "why": f"تحليل مؤسسي متزن حسب هيكل السعر والـ ATR ({round(risk, 1)} نقطة ستوب).", "facts": {}
     }
 
 
 # =====================================================
-# Database State & Management
+# Database & Management
 # =====================================================
 def get_paused_until():
     with sqlite3.connect(DB_FILE) as conn:
@@ -378,7 +378,7 @@ def stats_digest():
     wins = [s for s in done if s["r"] > 0]
     
     lines = [
-        "📊 التقرير الإحصائي المؤسسي الدقيق",
+        "📊 التقرير الإحصائي المؤسسي المستقر",
         "────────────────────────",
         f"💰 رصيد المحفظة التجريبية: ${bal:.2f}",
         f"📈 إجمالي الصفقات المغلقة: {len(done)}",
@@ -394,8 +394,8 @@ def stats_digest():
 # =====================================================
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🚀 بوت التداول المؤسسي المتوازن (v10.4)\n\n"
-        "/analyze - تحليل فوري بوقف خسارة منطقي واحترافي\n"
+        "🚀 بوت التداول المؤسسي المستقر (v10.5)\n\n"
+        "/analyze - تحليل فوري دقيق ومنطقي\n"
         "/subscribe - تلقي التنبيهات\n"
         "/stats - تقرير الأداء والمحفظة التجريبية\n"
         "/pause 60 - إيقاف مؤقت\n"
@@ -405,7 +405,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        msg = await update.message.reply_text("🔍 جاري حساب المستويات المؤسسية المنطقية...")
+        msg = await update.message.reply_text("🔍 جاري التحليل المستقر...")
         data = fetch_market_data()
         if not data:
             await msg.edit_text("❌ تعذّر جلب بيانات السوق.")
@@ -413,7 +413,7 @@ async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sig = smc_signal(data)
         
         lines = [
-            f"🎯 تحليل مؤسسي بوقف منطقي ({data['symbol']})",
+            f"🎯 تحليل سوق الذهب المستقر ({data['symbol']})",
             "────────────────────────",
             f"📌 الاتجاه: {sig['dir']}",
             f"💵 السعر الحالي: {data['price']}",
@@ -421,7 +421,7 @@ async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📍 الدخول: {sig['entry']} ({sig.get('mode', '')})",
             f"🎯 TP1: {sig['tp1']}",
             f"🎯 TP2: {sig['tp2']}",
-            f"🛑 SL: {sig['sl']} (منطقي ومحسوب)",
+            f"🛑 SL: {sig['sl']} (ستوب متزن ومنطقي)",
             f"⚖️ R:R: 1:{sig['rr']}",
             "",
             f"💡 السبب: {sig['why']}",
@@ -471,5 +471,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("pause", pause_cmd))
     app.add_handler(CommandHandler("resume", resume_cmd))
 
-    print("Smart ICT Institutional Bot v10.4 is running...")
+    print("Smart ICT Institutional Bot v10.5 Stable is running...")
     app.run_polling(drop_pending_updates=True)
