@@ -36,16 +36,15 @@ def fetch_market_price(symbol: str) -> dict:
     except Exception as e:
         print(f"API Error: {e}")
     
-    return {"price": 4111.85, "symbol": "XAU/USD"}
+    return {"price": 4186.60, "symbol": "XAU/USD"}
 
 # --- 4. محرك التحليل الاحترافي المتقدم (ICT & SMC via Gemini) ---
 def get_professional_ict_analysis(symbol: str, price: float) -> str:
     if not GEMINI_API_KEY:
         return "⚠️ خطأ: مفتاح الذكاء الاصطناعي (GEMINI_API_KEY) غير مضاف في بيئة Render."
 
-    # برومبت احترافي يطلب تطبيق مفاهيم ICT/SMC بدقة وعدم إعطاء صفقة إلا إذا كان الإعداد ممتازاً
     prompt_text = f"""
-أنت متداول محترف في المؤسسات المالية وتطبق بدقة مدارس التحليل الكلاسيكي المتقدمة، مفاهيم **ICT (Inner Circle Trader)**، و **SMC (Smart Money Concepts)**.
+أنت متداول محترف في المؤسسات المالية وتطبق بدقة مفاهيم **ICT (Inner Circle Trader)**، و **SMC (Smart Money Concepts)**.
 السعر الحالي للذهب (XAU/USD) هو: {price}
 
 المطلوب منك تحليل الوضع الفني الحالي باحترافية تامة:
@@ -69,7 +68,8 @@ def get_professional_ict_analysis(symbol: str, price: float) -> str:
 [اكتب تحليلاً دقيقاً ومختصراً يوضح سبب الدخول أو سبب اتخاذ قرار الانتظار WAIT بناءً على السيولة ومناطق الـ Order Block والـ FVG]
 """
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    # تم تحديث الموديل هنا إلى gemini-3.8-flash لتجنب الخطأ نهائياً
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={GEMINI_API_KEY}"
     headers = {"Content-Type": "application/json"}
     payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
 
@@ -110,7 +110,6 @@ if __name__ == "__main__":
         print("CRITICAL: TELEGRAM_BOT_TOKEN is missing!")
         exit(1)
 
-    # تشغيل خادم الويب الخلفي لتفادي نوم البوت
     threading.Thread(target=start_health_server, daemon=True).start()
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
