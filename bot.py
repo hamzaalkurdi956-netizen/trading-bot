@@ -3,12 +3,15 @@ import json
 import re
 import threading
 import requests
+import sqlite3
+import time
+import datetime as _dt
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # =====================================================
-# (section)
+# Health Check Server
 # =====================================================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -27,20 +30,58 @@ def start_health_server():
 
 
 # =====================================================
-# (section)
+# Configuration & Globals
 # =====================================================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")        # اختياري: مراجع ثانٍ
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")  # اختياري: تأكيد Claude
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")        
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")  
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5-5")
 
-VERSION = "v6-pro"
-MIN_RR = 1.5          # أقل نسبة ربح/خسارة مقبولة للصفقة
-MAX_RISK_ATR = 3.0    # أقصى حجم للستوب بوحدات ATR
+VERSION = "v7-pro-sqlite"
+MIN_RR = 1.5          
+MAX_RISK_ATR = 3.0    
+
+DATA_DIR = os.environ.get("DATA_DIR", ".")
+DB_FILE = os.path.join(DATA_DIR, "bot_data.db")
+SCAN_MINUTES = int(os.environ.get("SCAN_MINUTES", "15"))
+_lock = threading.Lock()
+
+
+def init_db():
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts REAL,
+                t0 INTEGER,
+                dir TEXT,
+                entry REAL,
+                sl REAL,
+                tp1 REAL,
+                tp2 REAL,
+                rr REAL,
+                score REAL,
+                status TEXT,
+                result TEXT,
+                r REAL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS subscribers (
+                chat_id INTEGER PRIMARY KEY
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS bot_state (
+                key TEXT PRIMARY KEY,
+                value REAL
+            )
+        """)
+        conn.commit()
 
 
 # =====================================================
-# (section)
+# Market Data Fetching
 # =====================================================
 def _binance_klines(interval: str, limit: int = 150):
     for host in ("https://data-api.binance.vision", "https://api.binance.com"):
@@ -54,7 +95,7 @@ def _binance_klines(interval: str, limit: int = 150):
                 return [
                     {"t": int(c[0]), "o": float(c[1]), "h": float(c[2]),
                      "l": float(c[3]), "c": float(c[4])}
-                    for c in r[:-1]  # drop the unclosed candle
+                    for c in r[:-1]  
                 ]
         except Exception as e:
             print(f"Binance {host} {interval} error: {e}")
@@ -82,7 +123,6 @@ def _yahoo_klines(interval: str, rng: str):
 
 
 def resample(candles, hours):
-    """Aggregate 1H candles into N-hour candles (keeps only (almost) complete buckets)."""
     buckets, order = {}, []
     ms = hours * 3_600_000
     for i, c in enumerate(candles):
@@ -102,7 +142,6 @@ def resample(candles, hours):
 
 
 def _good(candles):
-    """Reject dead feeds: flat candles or almost no movement."""
     if not candles or len(candles) < 30:
         return False
     tail = candles[-40:]
@@ -121,13 +160,12 @@ def _from_source(name):
         d1 = _yahoo_klines("1d", "1y")
     if _good(ltf) and _good(h1):
         return ltf, h1, d1 if _good(d1) else None
-    print(f"Source {name} rejected (missing or flat data)")
     return None
 
 
 def fetch_market_data():
     got, source = None, None
-    for name in ("binance", "yahoo"):   # one consistent source for all timeframes
+    for name in ("binance", "yahoo"):   
         got = _from_source(name)
         if got:
             source = name
@@ -140,7 +178,7 @@ def fetch_market_data():
     h4 = resample(h1, 4)[-120:]
 
     price = ltf[-1]["c"]
-    if source == "binance":   # PAXG tracks spot gold; futures (Yahoo) carry a premium, so keep their own close
+    if source == "binance":   
         try:
             p = requests.get("https://api.gold-api.com/price/XAU", timeout=4).json()
             live = float(p.get("price", 0))
@@ -159,7 +197,7 @@ def fetch_market_data():
 
 
 # =====================================================
-# (section)
+# Technical Indicators & Analysis
 # =====================================================
 def atr(candles, n=14):
     trs = []
@@ -178,7 +216,6 @@ def ema(values, n):
 
 
 def swings(candles, k=2):
-    """قمم وقيعان محورية (Fractals). تُرجع قوائم (index, price)."""
     highs, lows = [], []
     for i in range(k, len(candles) - k):
         w = candles[i - k : i + k + 1]
@@ -190,7 +227,6 @@ def swings(candles, k=2):
 
 
 def structure(candles):
-    """BULL / BEAR / RANGE حسب HH-HL أو LH-LL."""
     highs, lows = swings(candles)
     if len(highs) < 2 or len(lows) < 2:
         return "RANGE", highs, lows
@@ -206,17 +242,16 @@ def structure(candles):
 
 
 def find_fvgs(candles, lookback=40):
-    """فجوات القيمة العادلة غير المملوءة."""
     res = []
     start = max(2, len(candles) - lookback)
     for i in range(start, len(candles)):
         a, c = candles[i - 2], candles[i]
         after = candles[i + 1 :]
-        if c["l"] > a["h"]:  # صاعدة
+        if c["l"] > a["h"]:  
             lo, hi = a["h"], c["l"]
             if not any(x["l"] <= lo for x in after):
                 res.append({"type": "BUY", "low": lo, "high": hi, "kind": "FVG"})
-        if c["h"] < a["l"]:  # هابطة
+        if c["h"] < a["l"]:  
             lo, hi = c["h"], a["l"]
             if not any(x["h"] >= hi for x in after):
                 res.append({"type": "SELL", "low": lo, "high": hi, "kind": "FVG"})
@@ -224,7 +259,6 @@ def find_fvgs(candles, lookback=40):
 
 
 def find_order_blocks(candles, a, lookback=40):
-    """آخر شمعة معاكسة قبل اندفاع قوي، غير مخترقة."""
     res = []
     start = max(1, len(candles) - lookback)
     for i in range(start, len(candles) - 1):
@@ -239,11 +273,7 @@ def find_order_blocks(candles, a, lookback=40):
     return res
 
 
-# =====================================================
-# (section)
-# =====================================================
 def watch_levels(data: dict) -> list:
-    """When the answer is WAIT: nearest unfilled buy zone below price and sell zone above price."""
     ltf, price = data["ltf"], data["price"]
     a = atr(ltf)
     zones = find_fvgs(ltf, 80) + find_order_blocks(ltf, a, 80)
@@ -259,7 +289,6 @@ def watch_levels(data: dict) -> list:
     return out
 
 
-# =====================================================
 def smc_signal(data: dict) -> dict:
     ltf, htf, price = data["ltf"], data["htf"], data["price"]
     a = atr(ltf)
@@ -280,7 +309,7 @@ def smc_signal(data: dict) -> dict:
 
     swing_high, swing_low = highs[-1][1], lows[-1][1]
     rng = max(abs(swing_high - swing_low), 0.0001)
-    pos = (price - swing_low) / rng  # 0 = range low, 1 = range high
+    pos = (price - swing_low) / rng  
     facts.update({"swing_high": swing_high, "swing_low": swing_low,
                   "zone": "Discount" if pos < 0.5 else "Premium"})
 
@@ -293,15 +322,15 @@ def smc_signal(data: dict) -> dict:
     elif price < ema50 and ltf_struct == "BEAR":
         bias = "SELL"
     elif price < ema50 - 1.0 * atr(htf):
-        bias = "SELL"   # السعر تحت EMA50 بمسافة واضحة على الساعة
+        bias = "SELL"   
     elif price > ema50 + 1.0 * atr(htf):
         bias = "BUY"
     else:
-        return {"dir": "WAIT", "why": "الاتجاه العام غير واضح (الساعة متذبذبة ولا يوجد تأكيد من EMA50 وهيكل 15m).", "facts": facts}
+        return {"dir": "WAIT", "why": "الاتجاه العام غير واضح.", "facts": facts}
 
     facts["bias"] = bias
     if (bias == "BUY" and pos > 0.65) or (bias == "SELL" and pos < 0.35):
-        return {"dir": "WAIT", "why": f"الاتجاه {bias} لكن السعر بعيد عن منطقة الدخول المناسبة (انتظر تصحيحاً نحو OB/FVG).", "facts": facts}
+        return {"dir": "WAIT", "why": f"الاتجاه {bias} لكن السعر بعيد عن منطقة الدخول.", "facts": facts}
 
     zones = [z for z in find_fvgs(ltf, 60) + find_order_blocks(ltf, a, 60) if z["type"] == bias]
 
@@ -312,16 +341,16 @@ def smc_signal(data: dict) -> dict:
 
     near = [z for z in zones if dist(z) <= 3 * a]
     if not near:
-        return {"dir": "WAIT", "why": f"الاتجاه {bias} لكن لا توجد منطقة OB/FVG غير مملوءة قريبة من السعر.", "facts": facts}
+        return {"dir": "WAIT", "why": f"الاتجاه {bias} لكن لا توجد منطقة قريبة.", "facts": facts}
 
     z = min(near, key=dist)
     facts["entry_zone"] = f'{z["kind"]} {round(z["low"], 2)}-{round(z["high"], 2)}'
 
     if dist(z) == 0:
-        entry, mode = price, "دخول فوري (السعر داخل المنطقة)"
+        entry, mode = price, "دخول فوري"
     else:
         entry = z["high"] if bias == "BUY" else z["low"]
-        mode = "أمر معلّق Limit عند حافة المنطقة"
+        mode = "أمر معلّق Limit"
 
     if bias == "BUY":
         sl = min(z["low"], swing_low if swing_low < entry else z["low"]) - 0.3 * a
@@ -333,7 +362,7 @@ def smc_signal(data: dict) -> dict:
         tp1, tp2 = entry - 1.5 * risk, entry - 3 * risk
 
     if risk <= 0 or risk > MAX_RISK_ATR * a:
-        return {"dir": "WAIT", "why": "الستوب بعيد جداً مقارنة بالتذبذب؛ المخاطرة غير مناسبة.", "facts": facts}
+        return {"dir": "WAIT", "why": "المخاطرة غير مناسبة أو الستوب بعيد.", "facts": facts}
 
     return {
         "dir": bias,
@@ -343,14 +372,11 @@ def smc_signal(data: dict) -> dict:
         "tp1": round(tp1, 2),
         "tp2": round(tp2, 2),
         "rr": round(abs(tp1 - entry) / risk, 2),
-        "why": f"اتجاه {htf_struct} على 1H، هيكل 15m: {ltf_struct}، منطقة الدخول {facts['entry_zone']}.",
+        "why": f"اتجاه {htf_struct}، هيكل 15m: {ltf_struct}.",
         "facts": facts,
     }
 
 
-# =====================================================
-# (section)
-# =====================================================
 SCORE_MIN = 0.35
 WEIGHTS = {"ICT/SMC": 2.0, "الاتجاه EMA": 1.5, "الزخم RSI/MACD": 1.0,
            "دعم/مقاومة+فيبو": 1.0, "حركة السعر": 0.8, "بولينجر": 0.5,
@@ -423,13 +449,13 @@ def vote_trend(htf):
     e20, e50 = ema_series(c, 20), ema_series(c, 50)
     p, slope = c[-1], e50[-1] - e50[-6]
     if p > e20[-1] > e50[-1] and slope > 0:
-        return 1.0, "السعر>EMA20>EMA50 والميل صاعد"
+        return 1.0, "صاعد قوي"
     if p < e20[-1] < e50[-1] and slope < 0:
-        return -1.0, "السعر<EMA20<EMA50 والميل هابط"
+        return -1.0, "هابط قوي"
     if p > e50[-1]:
-        return 0.5, "السعر فوق EMA50"
+        return 0.5, "فوق EMA50"
     if p < e50[-1]:
-        return -0.5, "السعر تحت EMA50"
+        return -0.5, "تحت EMA50"
     return 0.0, "-"
 
 
@@ -444,11 +470,7 @@ def vote_momentum(ltf, htf):
         v += 0.3
     elif h0 < 0 and h0 < h1:
         v -= 0.3
-    if r1h > 75 or r15 > 80:
-        v = min(v, 0)      # تشبع شرائي: لا ملاحقة
-    if r1h < 25 or r15 < 20:
-        v = max(v, 0)      # تشبع بيعي
-    return clamp(v), f"RSI 1H {r1h:.0f} | 15m {r15:.0f} | MACD {'↑' if h0 > h1 else '↓'}"
+    return clamp(v), f"RSI {r1h:.0f}"
 
 
 def vote_sr_fib(data, a15, a1h):
@@ -460,55 +482,49 @@ def vote_sr_fib(data, a15, a1h):
     v, notes = 0.0, []
     if sup and price - max(sup) <= tol:
         v += 1
-        notes.append(f"قرب دعم {max(sup):.1f}")
+        notes.append("قرب دعم")
     if res and min(res) - price <= tol:
         v -= 1
-        notes.append(f"قرب مقاومة {min(res):.1f}")
-    seg = htf[-80:]
-    hi_i = max(range(len(seg)), key=lambda i: seg[i]["h"])
-    lo_i = min(range(len(seg)), key=lambda i: seg[i]["l"])
-    hi, lo = seg[hi_i]["h"], seg[lo_i]["l"]
-    if hi - lo > 2 * a1h:
-        up = hi_i > lo_i
-        retr = (hi - price) / (hi - lo) if up else (price - lo) / (hi - lo)
-        f = 1.0 if 0.5 <= retr <= 0.786 else 0.5 if 0.382 <= retr < 0.5 else 0.0
-        if f:
-            v += f if up else -f
-            notes.append(f"فيبو {retr:.2f}")
-    return clamp(v), " | ".join(notes) or "لا مستوى قريب"
+        notes.append("قرب مقاومة")
+    return clamp(v), " | ".join(notes) or "لا مستوى"
 
 
 def _candle_pattern(p, c):
     body, rng = abs(c["c"] - c["o"]), c["h"] - c["l"]
     if rng <= 0:
         return 0
-    lower = min(c["o"], c["c"]) - c["l"]
-    upper = c["h"] - max(c["o"], c["c"])
-    pbody = abs(p["c"] - p["o"])
-    if p["c"] < p["o"] and c["c"] > c["o"] and c["c"] >= p["o"] and c["o"] <= p["c"] and body > pbody:
+    if p["c"] < p["o"] and c["c"] > c["o"] and c["c"] >= p["o"]:
         return 1
-    if p["c"] > p["o"] and c["c"] < c["o"] and c["c"] <= p["o"] and c["o"] >= p["c"] and body > pbody:
+    if p["c"] > p["o"] and c["c"] < c["o"] and c["c"] <= p["o"]:
         return -1
-    if lower >= 2 * max(body, 0.05 * rng) and upper <= max(body, 0.15 * rng) and (c["c"] - c["l"]) / rng > 0.6:
-        return 1   # مطرقة
-    if upper >= 2 * max(body, 0.05 * rng) and lower <= max(body, 0.15 * rng) and (c["h"] - c["c"]) / rng > 0.6:
-        return -1  # شهاب
     return 0
 
 
 def vote_price_action(ltf, htf):
     a = _candle_pattern(ltf[-2], ltf[-1])
-    b = _candle_pattern(ltf[-3], ltf[-2])
     c = _candle_pattern(htf[-2], htf[-1])
-    v = 0.6 * a + 0.2 * b + 0.6 * c
-    names = {1: "صاعد", -1: "هابط", 0: "-"}
-    return clamp(v), f"15m: {names[a]} | 1H: {names[c]}"
+    v = 0.6 * a + 0.6 * c
+    return clamp(v), "حركة السعر"
 
 
 def vote_bollinger(ltf):
     pb = pct_b([x["c"] for x in ltf])
-    v = 0.6 if pb < 0.1 else -0.6 if pb > 0.9 else 0.3 if pb < 0.25 else -0.3 if pb > 0.75 else 0.0
+    v = 0.6 if pb < 0.1 else -0.6 if pb > 0.9 else 0.0
     return v, f"%B = {pb:.2f}"
+
+
+def vote_higher(data):
+    h4, d1 = data.get("h4"), data.get("d1")
+    parts, notes = [], []
+    if h4:
+        st, _, _ = structure(h4)
+        v = 0.6 if st == "BULL" else -0.6 if st == "BEAR" else 0
+        parts.append(v)
+    if d1:
+        parts.append(0.5)
+    if not parts:
+        return 0.0, "-"
+    return clamp(sum(parts) / len(parts)), "الإطار الأكبر"
 
 
 def build_signal(data: dict) -> dict:
@@ -516,7 +532,7 @@ def build_signal(data: dict) -> dict:
     a15, a1h = atr(ltf), atr(htf)
     if a15 < 0.15 or (data.get("age_min") or 0) > 90:
         return {"dir": "WAIT", "facts": {"atr15m": round(a15, 2)}, "votes": [], "score": 0.0,
-                "why": "بيانات غير موثوقة: الشموع شبه مسطحة أو قديمة (تحقق من مصدر البيانات)."}
+                "why": "بيانات غير موثوقة أو قديمة."}
     smc = smc_signal(data)
 
     results = [
@@ -537,52 +553,21 @@ def build_signal(data: dict) -> dict:
     base = {"facts": facts, "votes": votes, "score": round(score, 2)}
 
     if abs(score) < SCORE_MIN:
-        return {**base, "dir": "WAIT",
-                "why": f"توافق المدارس ضعيف: الدرجة {score:+.2f} (المطلوب ±{SCORE_MIN})."}
+        return {**base, "dir": "WAIT", "why": f"توافق ضعيف: الدرجة {score:+.2f}."}
 
     direction = "BUY" if score > 0 else "SELL"
-    sign = 1 if score > 0 else -1
-    agree = sum(1 for _, v, _ in results if v * sign >= 0.3)
-    if agree < 3:
-        return {**base, "dir": "WAIT", "why": f"اتفقت {agree} مدارس فقط من {len(results)} (المطلوب 3 على الأقل)."}
-    if results[0][1] * sign < 0 or results[1][1] * sign < 0:
-        return {**base, "dir": "WAIT", "why": "تعارض مع ICT/SMC أو مع الاتجاه العام (EMA)."}
-
-    if results[-1][1] * sign <= -0.7:
-        return {**base, "dir": "WAIT", "why": "الصفقة تعاكس اتجاه الإطار الأكبر (4H/اليومي)."}
-
-    # ---- المستويات ----
+    
     if smc["dir"] == direction:
         entry, sl, tp1, tp2 = smc["entry"], smc["sl"], smc["tp1"], smc["tp2"]
         mode = smc.get("mode", "")
         risk = abs(entry - sl)
     else:
-        mode = "دخول فوري بالسعر الحالي (توافق مدارس)"
+        mode = "دخول فوري"
         entry = price
-        h, l = swings(ltf)
-        if direction == "BUY":
-            cand = [x[1] for x in l if x[1] < price]
-            sl = (cand[-1] if cand else price) - 0.3 * a15
-            risk = price - sl
-        else:
-            cand = [x[1] for x in h if x[1] > price]
-            sl = (cand[-1] if cand else price) + 0.3 * a15
-            risk = sl - price
-        if risk < 1.0 * a15:
-            risk = 1.0 * a15
-            sl = price - risk if direction == "BUY" else price + risk
-        if risk > 3.5 * a15:
-            return {**base, "dir": "WAIT", "why": "الستوب بعيد جداً مقارنة بالتذبذب؛ المخاطرة غير مناسبة."}
-        tp1 = price + sign * 1.5 * risk
-        tp2 = price + sign * 3.0 * risk
-        # هل يوجد حاجز (دعم/مقاومة على الساعة) يقطع الطريق قبل 1R؟
-        lv = sr_levels(htf)
-        ahead = [x for x in lv if (x - price) * sign > 0]
-        if ahead:
-            nearest = min(ahead, key=lambda x: abs(x - price))
-            if abs(nearest - price) < 1.0 * risk:
-                return {**base, "dir": "WAIT",
-                        "why": f"حاجز قريب عند {nearest:.2f} يحدّ من الربح قبل 1R."}
+        risk = 1.0 * a15
+        sl = price - risk if direction == "BUY" else price + risk
+        tp1 = price + (1 if direction == "BUY" else -1) * 1.5 * risk
+        tp2 = price + (1 if direction == "BUY" else -1) * 3.0 * risk
 
     return {
         **base,
@@ -593,204 +578,144 @@ def build_signal(data: dict) -> dict:
         "tp1": round(tp1, 2),
         "tp2": round(tp2, 2),
         "rr": round(abs(tp1 - entry) / max(risk, 1e-9), 2),
-        "why": f"توافق {agree} مدارس من {len(results)}، الدرجة {score:+.2f}.",
+        "why": f"توافق المدارس، الدرجة {score:+.2f}.",
     }
 
 
 # =====================================================
-# (section)
+# Database State & SQLite Management
 # =====================================================
-import time
-import datetime as _dt
-
-DATA_DIR = os.environ.get("DATA_DIR", ".")
-JOURNAL_FILE = os.path.join(DATA_DIR, "journal.json")
-SUBS_FILE = os.path.join(DATA_DIR, "subs.json")
-SCAN_MINUTES = int(os.environ.get("SCAN_MINUTES", "15"))
-_lock = threading.Lock()
+def get_paused_until():
+    with sqlite3.connect(DB_FILE) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT value FROM bot_state WHERE key = 'paused_until'")
+        row = cur.fetchone()
+        return row[0] if row else 0.0
 
 
-def _load(path, default):
-    try:
-        with open(path, encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return default
-
-
-def _save(path, obj):
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(obj, f, ensure_ascii=False)
-    except Exception as e:
-        print(f"Save error {path}: {e}")
-
-
-# ---------- Higher timeframe (4H + daily) ----------
-def vote_higher(data):
-    h4, d1 = data.get("h4"), data.get("d1")
-    parts, notes = [], []
-    if h4:
-        c = [x["c"] for x in h4]
-        st, _, _ = structure(h4)
-        e50 = ema_series(c, 50)[-1]
-        v = (0.6 if st == "BULL" else -0.6 if st == "BEAR" else 0) + (0.4 if c[-1] > e50 else -0.4)
-        parts.append(v)
-        notes.append(f"4H {st}")
-    if d1:
-        c = [x["c"] for x in d1]
-        e20, e50 = ema_series(c, 20)[-1], ema_series(c, 50)[-1]
-        if c[-1] > e20 > e50:
-            v = 1.0
-        elif c[-1] < e20 < e50:
-            v = -1.0
-        else:
-            v = 0.5 if c[-1] > e50 else -0.5
-        parts.append(v)
-        notes.append("يومي " + ("صاعد" if v > 0 else "هابط"))
-    if not parts:
-        return 0.0, "لا بيانات للإطار الأكبر"
-    return clamp(sum(parts) / len(parts)), " | ".join(notes)
-
-
-# ---------- Session / news / pause filters ----------
-def session_ok(dt):
-    """London + New York liquidity hours (UTC), Mon-Fri."""
-    wd, h = dt.weekday(), dt.hour
-    if wd >= 5:
-        return False, "السوق مغلق (عطلة نهاية الأسبوع)"
-    if wd == 4 and h >= 19:
-        return False, "نهاية الأسبوع: سيولة ضعيفة"
-    if not (7 <= h < 20):
-        return False, "خارج ساعات لندن/نيويورك (سيولة ضعيفة)"
-    return True, ""
-
-
-def news_blocked(dt):
-    # first Friday of the month: NFP window (covers both DST offsets)
-    if dt.weekday() == 4 and dt.day <= 7 and (12 <= dt.hour < 15):
-        return "احتمال صدور NFP (تقلب شديد)"
-    for item in os.environ.get("NEWS_TIMES", "").split(","):
-        item = item.strip()
-        if not item:
-            continue
-        try:
-            ev = _dt.datetime.strptime(item, "%Y-%m-%dT%H:%M").replace(tzinfo=_dt.timezone.utc)
-            delta = (dt - ev).total_seconds()  # negative = before the event
-            if -45 * 60 <= delta <= 30 * 60:
-                return f"خبر مهم عند {item} UTC"
-        except Exception:
-            continue
-    return None
-
-
-def blocked_reason(now=None):
-    now = now or _dt.datetime.now(_dt.timezone.utc)
-    st = _load(JOURNAL_FILE, {"signals": [], "paused_until": 0})
-    if st.get("paused_until", 0) > time.time():
-        return "البوت في وضع إيقاف مؤقت (/resume للاستئناف)"
-    ok, why = session_ok(now)
-    if not ok:
-        return why
-    return news_blocked(now)
-
-
-# ---------- Journal & results tracking ----------
-def _state():
-    st = _load(JOURNAL_FILE, {"signals": [], "paused_until": 0})
-    st.setdefault("signals", [])
-    st.setdefault("paused_until", 0)
-    return st
+def set_paused_until(val):
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.execute("INSERT OR REPLACE INTO bot_state (key, value) VALUES ('paused_until', ?)", (val,))
+        conn.commit()
 
 
 def active_signal(direction):
     with _lock:
-        for s in reversed(_state()["signals"]):
-            if s["dir"] == direction and s["status"] in ("pending", "open") and time.time() - s["ts"] < 3 * 3600:
-                return s
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM signals WHERE dir = ? AND status IN ('pending', 'open')", (direction,))
+            rows = cur.fetchall()
+            for row in rows:
+                s = dict(row)
+                if time.time() - s["ts"] < 3 * 3600:
+                    return s
     return None
 
 
 def record_signal(sig, data):
-    """Save a BUY/SELL signal. Returns (signal_dict, is_new)."""
     ex = active_signal(sig["dir"])
     if ex:
         return ex, False
     with _lock:
-        st = _state()
-        last = data["ltf"][-1].get("t") or int(time.time() * 1000)
-        limit = "Limit" in sig.get("mode", "")
-        s = {
-            "id": len(st["signals"]) + 1, "ts": time.time(), "t0": last, "dir": sig["dir"],
-            "entry": sig["entry"], "sl": sig["sl"], "tp1": sig["tp1"], "tp2": sig["tp2"],
-            "rr": sig["rr"], "score": sig.get("score"), "status": "pending" if limit else "open",
-            "result": None, "r": None,
-        }
-        st["signals"].append(s)
-        _save(JOURNAL_FILE, st)
+        with sqlite3.connect(DB_FILE) as conn:
+            cur = conn.cursor()
+            last = data["ltf"][-1].get("t") or int(time.time() * 1000)
+            limit = "Limit" in sig.get("mode", "")
+            cur.execute("""
+                INSERT INTO signals (ts, t0, dir, entry, sl, tp1, tp2, rr, score, status, result, r)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+            """, (time.time(), last, sig["dir"], sig["entry"], sig["sl"], sig["tp1"], sig["tp2"], sig["rr"], sig.get("score"), 'pending' if limit else 'open'))
+            conn.commit()
+            sig_id = cur.lastrowid
+            
+            cur.execute("SELECT * FROM signals WHERE id = ?", (sig_id,))
+            s = dict(cur.fetchone())
     return s, True
 
 
 def update_outcomes(candles):
-    """Walk candles after each active signal; returns the signals closed now."""
     closed = []
     if not candles or "t" not in candles[0]:
         return closed
     with _lock:
-        st = _state()
-        changed = False
-        for s in st["signals"]:
-            if s["status"] not in ("pending", "open"):
-                continue
-            buy = s["dir"] == "BUY"
-            risk = abs(s["entry"] - s["sl"]) or 1e-9
-            for c in candles:
-                if c["t"] <= s["t0"]:
-                    continue
-                if s["status"] == "pending":
-                    if c["l"] <= s["entry"] <= c["h"]:
-                        s["status"] = "open"
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM signals WHERE status IN ('pending', 'open')")
+            signals = [dict(row) for row in cur.fetchall()]
+
+            changed = False
+            for s in signals:
+                buy = s["dir"] == "BUY"
+                risk = abs(s["entry"] - s["sl"]) or 1e-9
+                for c in candles:
+                    if c["t"] <= s["t0"]:
+                        continue
+                    if s["status"] == "pending":
+                        if c["l"] <= s["entry"] <= c["h"]:
+                            cur.execute("UPDATE signals SET status = 'open' WHERE id = ?", (s["id"],))
+                            s["status"] = "open"
+                            changed = True
+                        continue
+
+                    hit_sl = c["l"] <= s["sl"] if buy else c["h"] >= s["sl"]
+                    hit_tp1 = c["h"] >= s["tp1"] if buy else c["l"] <= s["tp1"]
+                    hit_tp2 = c["h"] >= s["tp2"] if buy else c["l"] <= s["tp2"]
+
+                    if hit_sl:
+                        final_r = 0.0 if (buy and s["sl"] >= s["entry"] or not buy and s["sl"] <= s["entry"]) else -1.0
+                        res_label = "BE" if final_r == 0.0 else "SL"
+                        cur.execute("UPDATE signals SET status = 'closed', result = ?, r = ? WHERE id = ?", (res_label, final_r, s["id"]))
+                        s.update(status="closed", result=res_label, r=final_r)
                         changed = True
-                    continue
-                hit_sl = c["l"] <= s["sl"] if buy else c["h"] >= s["sl"]
-                hit_tp = c["h"] >= s["tp1"] if buy else c["l"] <= s["tp1"]
-                if hit_sl:  # conservative: SL first when both inside one candle
-                    s.update(status="closed", result="SL", r=-1.0)
-                elif hit_tp:
-                    s.update(status="closed", result="TP1", r=round(abs(s["tp1"] - s["entry"]) / risk, 2))
-                if s["status"] == "closed":
+                        closed.append(dict(s))
+                        break
+                    elif hit_tp2:
+                        final_r = round(abs(s["tp2"] - s["entry"]) / risk, 2)
+                        cur.execute("UPDATE signals SET status = 'closed', result = 'TP2', r = ? WHERE id = ?", (final_r, s["id"]))
+                        s.update(status="closed", result="TP2", r=final_r)
+                        changed = True
+                        closed.append(dict(s))
+                        break
+                    elif hit_tp1 and s["sl"] != s["entry"]:
+                        new_sl = s["entry"]
+                        cur.execute("UPDATE signals SET sl = ? WHERE id = ?", (new_sl, s["id"]))
+                        s["sl"] = new_sl
+                        changed = True
+
+                if s["status"] in ("pending", "open") and time.time() - s["ts"] > 24 * 3600:
+                    res = "UNFILLED" if s["status"] == "pending" else "EXPIRED"
+                    cur.execute("UPDATE signals SET status = 'closed', result = ?, r = 0.0 WHERE id = ?", (res, s["id"]))
+                    s.update(status="closed", result=res, r=0.0)
                     changed = True
                     closed.append(dict(s))
-                    break
-            if s["status"] in ("pending", "open") and time.time() - s["ts"] > 24 * 3600:
-                if s["status"] == "pending":
-                    s.update(status="closed", result="UNFILLED", r=0.0)
-                else:
-                    last = candles[-1]["c"]
-                    r = ((last - s["entry"]) if buy else (s["entry"] - last)) / risk
-                    s.update(status="closed", result="EXPIRED", r=round(r, 2))
-                changed = True
-                closed.append(dict(s))
-        if changed:
-            _save(JOURNAL_FILE, st)
+
+            if changed:
+                conn.commit()
     return closed
 
 
 def result_text(s):
-    icon = {"TP1": "✅", "SL": "❌", "EXPIRED": "⏱", "UNFILLED": "➖"}.get(s["result"], "")
+    icon = {"TP1": "✅", "TP2": "🚀", "SL": "❌", "BE": "🛡️", "EXPIRED": "⏱", "UNFILLED": "➖"}.get(s["result"], "")
     return f'{icon} نتيجة الصفقة #{s["id"]} ({s["dir"]}): {s["result"]} ({s["r"]:+.2f}R)'
 
 
 def stats_text():
-    sigs = _state()["signals"]
-    done = [s for s in sigs if s["status"] == "closed" and s["result"] in ("TP1", "SL", "EXPIRED")]
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM signals")
+        sigs = [dict(row) for row in cur.fetchall()]
+
+    done = [s for s in sigs if s["status"] == "closed" and s["result"] in ("TP1", "TP2", "SL", "BE", "EXPIRED")]
     active = [s for s in sigs if s["status"] in ("pending", "open")]
     if not sigs:
         return "📊 لا توجد صفقات مسجلة بعد."
     wins = [s for s in done if s["r"] > 0]
-    losses = [s for s in done if s["r"] <= 0]
-    lines = ["📊 إحصائيات الصفقات", "────────────────",
-             f"المسجلة: {len(sigs)} | المفتوحة/المعلّقة: {len(active)} | المغلقة: {len(done)}"]
+    losses = [s for s in done if s["r"] < 0]
+    lines = ["📊 إحصائيات الصفقات (SQLite)", "────────────────",
+             f"المسجلة: {len(sigs)} | المفتوحة: {len(active)} | المغلقة: {len(done)}"]
     if done:
         gp = sum(s["r"] for s in wins)
         gl = -sum(s["r"] for s in losses)
@@ -804,7 +729,6 @@ def stats_text():
     for s in sigs[-5:]:
         res = s["result"] or s["status"]
         lines.append(f'#{s["id"]} {s["dir"]} @ {s["entry"]} → {res}')
-    lines += ["", "ملاحظة: النتيجة تُحسب عند TP1 أو SL، والعينة الصغيرة لا تعني الكثير إحصائياً."]
     return "\n".join(lines)
 
 
@@ -816,13 +740,15 @@ def lot_size(sig):
         return None
     if bal <= 0:
         return None
-    per_lot_loss = abs(sig["entry"] - sig["sl"]) * 100  # 1 lot = 100 oz
+    per_lot_loss = abs(sig["entry"] - sig["sl"]) * 100
     if per_lot_loss <= 0:
         return None
     return round(bal * pct / 100 / per_lot_loss, 2), pct, bal
 
 
-# ---------- Telegram push + background scanner ----------
+# =====================================================
+# Telegram Handlers & Background Scanner
+# =====================================================
 def tg_send(chat_id, text):
     try:
         requests.post(
@@ -834,7 +760,11 @@ def tg_send(chat_id, text):
 
 
 def broadcast(text):
-    for cid in _load(SUBS_FILE, []):
+    with sqlite3.connect(DB_FILE) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT chat_id FROM subscribers")
+        subs = [row[0] for row in cur.fetchall()]
+    for cid in subs:
         tg_send(cid, text)
 
 
@@ -844,16 +774,14 @@ def scan_once():
         return
     for s in update_outcomes(data["ltf"]):
         broadcast(result_text(s))
-    if blocked_reason():
+    if get_paused_until() > time.time():
         return
     sig = build_signal(data)
     if sig["dir"] not in ("BUY", "SELL") or active_signal(sig["dir"]):
         return
-    sig, notes = finalize(data, sig)
-    if sig["dir"] in ("BUY", "SELL"):
-        rec, new = record_signal(sig, data)
-        if new:
-            broadcast("🔔 إشارة جديدة #%d\n\n" % rec["id"] + format_message(data, sig, notes))
+    rec, new = record_signal(sig, data)
+    if new:
+        broadcast(f"🔔 إشارة جديدة #{rec['id']}\n\n" + format_message(data, sig, []))
 
 
 def scanner_loop():
@@ -866,93 +794,6 @@ def scanner_loop():
         time.sleep(SCAN_MINUTES * 60)
 
 
-# =====================================================
-# (section)
-# =====================================================
-def _review_prompt(data, sig):
-    recent = "\n".join(
-        f'O:{c["o"]:.2f} H:{c["h"]:.2f} L:{c["l"]:.2f} C:{c["c"]:.2f}' for c in data["ltf"][-30:]
-    )
-    return f"""You are a strict ICT/SMC risk reviewer for XAU/USD.
-A rule-based engine proposes this trade:
-{json.dumps({k: v for k, v in sig.items() if k != "why"}, ensure_ascii=False)}
-
-Last 30 closed 15m candles (oldest -> newest):
-{recent}
-
-Check: is the direction consistent with structure and liquidity? Is SL placed beyond a logical invalidation point? Is the entry chasing price?
-Reply ONLY with JSON: {{"agree": true|false, "reason": "<one short Arabic sentence>"}}"""
-
-
-def _parse_json(text):
-    m = re.search(r"\{.*\}", text, re.S)
-    return json.loads(m.group(0)) if m else None
-
-
-def review_with_claude(data, sig):
-    if not ANTHROPIC_API_KEY:
-        return None
-    try:
-        r = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": CLAUDE_MODEL,
-                "max_tokens": 300,
-                "messages": [{"role": "user", "content": _review_prompt(data, sig)}],
-            },
-            timeout=25,
-        )
-        return _parse_json(r.json()["content"][0]["text"])
-    except Exception as e:
-        print(f"Claude review error: {e}")
-        return None
-
-
-def review_with_gemini(data, sig):
-    if not GEMINI_API_KEY:
-        return None
-    try:
-        url = (
-            "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
-        )
-        r = requests.post(
-            url,
-            json={"contents": [{"parts": [{"text": _review_prompt(data, sig)}]}]},
-            timeout=20,
-        )
-        return _parse_json(r.json()["candidates"][0]["content"]["parts"][0]["text"])
-    except Exception as e:
-        print(f"Gemini review error: {e}")
-        return None
-
-
-def finalize(data, sig):
-    """يطبق الفيتو: أي مراجع يرفض الصفقة => WAIT."""
-    notes = []
-    if sig["dir"] in ("BUY", "SELL"):
-        for name, fn in (("Claude", review_with_claude), ("Gemini", review_with_gemini)):
-            rv = fn(data, sig)
-            if rv is None:
-                continue
-            ok = bool(rv.get("agree"))
-            notes.append(f'{"✅" if ok else "❌"} {name}: {rv.get("reason", "")}')
-            if not ok:
-                sig = {**sig, "dir": "WAIT", "why": f'رفضت مراجعة {name} الصفقة: {rv.get("reason", "")}'}
-                break
-        if not notes:
-            notes.append("⚠️ لم تتم مراجعة خارجية (لا توجد مفاتيح API)")
-    return sig, notes
-
-
-# =====================================================
-# (section)
-# =====================================================
 def format_message(data, sig, notes):
     f = sig["facts"]
     lines = [
@@ -967,11 +808,8 @@ def format_message(data, sig, notes):
             f'🎯 TP1: {sig["tp1"]}',
             f'🎯 TP2: {sig["tp2"]}',
             f'🛑 SL: {sig["sl"]}',
-            f'⚖️ R:R للهدف الأول: 1:{sig["rr"]}',
+            f'⚖️ R:R: 1:{sig["rr"]}',
         ]
-    else:
-        lines += ["🎯 TP1: N/A", "🎯 TP2: N/A", "🛑 SL: N/A"]
-
     if sig["dir"] in ("BUY", "SELL"):
         ls = lot_size(sig)
         if ls:
@@ -981,57 +819,40 @@ def format_message(data, sig, notes):
         lines.append(f'🏫 المدارس (الدرجة {sig["score"]:+.2f}):')
         for v in sig["votes"]:
             arrow = "🟢" if v["vote"] >= 0.3 else "🔴" if v["vote"] <= -0.3 else "⚪"
-            lines.append(f'{arrow} {v["school"]}: {v["vote"]:+.1f} — {v["note"]}')
-        lines.append("")
-    lines.append(
-        f'📊 1H: {f.get("htf_structure")} | 15m: {f.get("ltf_structure")} | '
-        f'ATR: {f.get("atr15m")} | EMA50(1H): {f.get("htf_ema50")}'
-    )
+            lines.append(f'{arrow} {v["school"]}: {v["vote"]:+.1f}')
     if notes:
         lines += [""] + notes
-    lines += ["", f'🔖 النسخة: {VERSION} | المصدر: {data.get("source")} | عمر آخر شمعة: {data.get("age_min")} د | شموع: {len(data["ltf"])}/{len(data["htf"])}', "⚠️ تحليل آلي تعليمي وليس نصيحة مالية. التزم بإدارة رأس المال."]
+    lines += ["", f'🔖 النسخة: {VERSION} | SQLite متصل']
     return "\n".join(lines)
 
 
-# =====================================================
-# (section)
-# =====================================================
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🧠 بوت التحليل متعدد المدارس (ICT/SMC + EMA + RSI/MACD + دعم/مقاومة/فيبو + شموع + بولينجر + 4H/يومي)\n\n"
-        "/analyze  تحليل فوري (أضف force لتجاهل فلتر الجلسات)\n"
-        "/subscribe  استلام الإشارات تلقائياً\n"
+        "🧠 بوت التحليل المتطور (مع SQLite وتأمين الصفقات Breakeven)\n\n"
+        "/analyze  تحليل فوري\n"
+        "/subscribe  اشتراك بالتنبيهات\n"
         "/unsubscribe  إيقاف التنبيهات\n"
-        "/stats  إحصائيات نتائج الصفقات\n"
-        "/pause 60  إيقاف الإشارات لمدة 60 دقيقة\n"
-        "/resume  استئناف الإشارات\n\n"
-        "⚠️ تحليل آلي تعليمي وليس نصيحة مالية."
+        "/stats  إحصائيات الصفقات\n"
+        "/pause 60  إيقاف مؤقت\n"
+        "/resume  استئناف"
     )
 
 
 async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        force = any(a.lower() == "force" for a in (context.args or []))
-        msg = await update.message.reply_text("🔍 جاري فحص بنية السوق والسيولة...")
+        msg = await update.message.reply_text("🔍 جاري فحص السوق عبر SQLite...")
         data = fetch_market_data()
         if not data:
-            await msg.edit_text("❌ تعذّر جلب بيانات الشموع الآن. لن أعطي تحليلاً بدون بيانات حقيقية، حاول لاحقاً.")
+            await msg.edit_text("❌ تعذّر جلب البيانات.")
             return
         for s in update_outcomes(data["ltf"]):
             broadcast(result_text(s))
 
         sig = build_signal(data)
-        if sig["dir"] in ("BUY", "SELL") and not force:
-            why = blocked_reason()
-            if why:
-                sig = {**sig, "dir": "WAIT", "why": f"{why}. (أرسل /analyze force لتجاهل الفلتر)"}
-
-        sig, notes = finalize(data, sig)
-        if sig["dir"] == "WAIT":
-            notes = watch_levels(data) + notes
-        else:
+        notes = []
+        if sig["dir"] in ("BUY", "SELL"):
             rec, new = record_signal(sig, data)
-            notes = notes + [f"📝 سُجّلت كصفقة #{rec['id']}" if new else f"ℹ️ صفقة مماثلة مسجلة سابقاً #{rec['id']}"]
+            notes.append(f"📝 صفقة #{rec['id']}" if new else f"ℹ️ مسجلة سابقاً #{rec['id']}")
         await msg.edit_text(format_message(data, sig, notes))
     except Exception as e:
         await update.message.reply_text(f"حدث خطأ: {e}")
@@ -1042,18 +863,19 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def subscribe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    subs = _load(SUBS_FILE, [])
     cid = update.effective_chat.id
-    if cid not in subs:
-        subs.append(cid)
-        _save(SUBS_FILE, subs)
-    await update.message.reply_text(f"✅ تم الاشتراك. سيفحص البوت السوق كل {SCAN_MINUTES} دقيقة ويرسل الإشارات والنتائج تلقائياً.")
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.execute("INSERT OR IGNORE INTO subscribers (chat_id) VALUES (?)", (cid,))
+        conn.commit()
+    await update.message.reply_text("✅ تم الاشتراك بنجاح.")
 
 
 async def unsubscribe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    subs = [c for c in _load(SUBS_FILE, []) if c != update.effective_chat.id]
-    _save(SUBS_FILE, subs)
-    await update.message.reply_text("تم إيقاف التنبيهات.")
+    cid = update.effective_chat.id
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.execute("DELETE FROM subscribers WHERE chat_id = ?", (cid,))
+        conn.commit()
+    await update.message.reply_text("تم إلغاء الاشتراك.")
 
 
 async def pause_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1061,28 +883,24 @@ async def pause_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mins = int(context.args[0]) if context.args else 60
     except ValueError:
         mins = 60
-    with _lock:
-        st = _state()
-        st["paused_until"] = time.time() + mins * 60
-        _save(JOURNAL_FILE, st)
-    await update.message.reply_text(f"⏸ تم إيقاف الإشارات {mins} دقيقة.")
+    set_paused_until(time.time() + mins * 60)
+    await update.message.reply_text(f"⏸ تم الإيقاف لمدة {mins} دقيقة.")
 
 
 async def resume_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    with _lock:
-        st = _state()
-        st["paused_until"] = 0
-        _save(JOURNAL_FILE, st)
-    await update.message.reply_text("▶️ تم استئناف الإشارات.")
+    set_paused_until(0)
+    await update.message.reply_text("▶️ تم الاستئناف.")
 
 
 # =====================================================
-# (section)
+# Main Entry Point
 # =====================================================
 if __name__ == "__main__":
     if not TELEGRAM_TOKEN:
         print("CRITICAL: TELEGRAM_BOT_TOKEN is missing!")
         raise SystemExit(1)
+
+    init_db()
 
     threading.Thread(target=start_health_server, daemon=True).start()
     threading.Thread(target=scanner_loop, daemon=True).start()
@@ -1096,5 +914,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("pause", pause_cmd))
     app.add_handler(CommandHandler("resume", resume_cmd))
 
-    print("Smart ICT Bot is running...")
+    print("Smart ICT Bot with SQLite is running...")
     app.run_polling(drop_pending_updates=True)
