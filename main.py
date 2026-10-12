@@ -11,7 +11,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-type', 'text/plain; charset=utf-8')
         self.end_headers()
-        self.wfile.write(b"Stable ICT/SMC Bot is running!")
+        self.wfile.write(b"Smart ICT/SMC Bot is running!")
 
     def log_message(self, format, *args):
         return
@@ -25,13 +25,12 @@ def start_health_server():
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# --- 3. جلب بيانات الشمعات مع حماية كاملة ضد أخطاء الاتصال ---
+# --- 3. جلب بيانات السوق والشمعات الحقيقية ---
 def fetch_market_data() -> dict:
-    price = 4183.70
-    candles_text = "Standard XAU/USD Price Action Data"
+    price = 4180.00
+    candles_text = "Market Structure Data"
     
     try:
-        # جلب السعر الفوري أولاً وبسرعة فائقة
         price_res = requests.get("https://api.gold-api.com/price/XAU", timeout=4).json()
         if "price" in price_res and price_res["price"] > 0:
             price = round(float(price_res["price"]), 2)
@@ -39,14 +38,13 @@ def fetch_market_data() -> dict:
         print(f"Price API Error: {e}")
 
     try:
-        # جلب الشمعات كدعم إضافي للتحليل
-        url = "https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval=15m&limit=15"
+        url = "https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval=15m&limit=20"
         res = requests.get(url, timeout=5).json()
         if isinstance(res, list) and len(res) > 0:
             candles_summary = [f"High: {c[2]}, Low: {c[3]}, Close: {c[4]}" for c in res]
-            candles_text = "\n".join(candles_summary[-10:])
+            candles_text = "\n".join(candles_summary[-12:])
     except Exception as e:
-        print(f"Candles API Warning (Using fallback text): {e}")
+        print(f"Candles API Warning: {e}")
 
     return {
         "price": price,
@@ -54,35 +52,38 @@ def fetch_market_data() -> dict:
         "symbol": "XAU/USD"
     }
 
-# --- 4. محرك التحليل الاحترافي القائم على ICT / SMC ---
+# --- 4. محرك التحليل الذكي (BUY / SELL / WAIT) ---
 def get_professional_ict_analysis(symbol: str, price: float, candles_text: str) -> str:
-    # تحليل احتياطي ذكي وفوري يعمل بالكامل في حال تعثر اتصال الـ AI لتجنب أي تعطل
+    # تحليل احتياطي ذكي في حال تأخر الاستجابة
     fallback_analysis = f"""🎯 **تحليل صفقات المؤسسات الذكية ({symbol})**
 ────────────────
-📌 **الاتجاه الفني:** BUY
+📌 **الاتجاه الفني:** WAIT
 💵 **السعر الحالي المباشر:** {price}
 
-🎯 **TP1:** {round(price + 6.0, 2)}
-🎯 **TP2:** {round(price + 12.0, 2)}
-🛑 **SL:** {round(price - 5.0, 2)}
+🎯 **TP1:** N/A
+🎯 **TP2:** N/A
+🛑 **SL:** N/A
 
 💡 **فلسفة التحليل (ICT / SMC):**
-السعر يحترم مناطق السيولة الشرائية (Buy-side Liquidity) مع اختبار ناجح لمنطقة Order Block و Fair Value Gap على فريم الـ 15 دقيقة، مما يدعم استمرار الصعود."""
+السوق يمر بمرحلة تذبذب عرضي أو عدم وضوح في الهيكل حالياً، يفضل الانتظار لحين كسر مناطق السيولة أو تشكل Order Block حقيقي."""
 
     if not GEMINI_API_KEY:
         return fallback_analysis
 
     prompt_text = f"""
-أنت خبير تداول محترف في المؤسسات المالية وتطبق حصراً مفاهيم **ICT (Inner Circle Trader)** و **SMC (Smart Money Concepts)**.
+أنت متداول مؤسسات محترف تطبق بدقة مفاهيم **ICT (Inner Circle Trader)** و **SMC (Smart Money Concepts)**.
+ممنوع إعطاء صفقات عشوائية بتاتاً. يجب أن تكون الدقة عالية جداً.
 
-البيانات الحالية للذهب ({symbol}):
-- السعر الحالي المباشر: {price}
+بيانات الذهب المباشرة ({symbol}):
+- السعر الحالي: {price}
 - حركة الشمعات الأخيرة:
 {candles_text}
 
-قم بتحليل السيولة، هيكل السوق (BOS)، ومناطق الـ Order Blocks بدقة:
-1. إذا لم تكن هناك فرصة واضحة، حدد الاتجاه **WAIT**.
-2. إذا وجدت فرصة قوية، حدد الاتجاه (BUY أو SELL) وقم بحساب TP1، TP2، SL بدقة بناءً على القمم والقيعان المتاحة.
+المطلوب بدقة:
+1. ادرس بنية السوق والسيولة ومناطق الـ (Order Blocks / FVG).
+2. إذا كانت الفرصة **صاعدة قوية**، حدد الاتجاه **BUY** مع حساب TP1، TP2، SL بدقة.
+3. إذا كانت الفرصة **هابطة واضحة**، حدد الاتجاه **SELL** مع حساب TP1، TP2، SL بدقة.
+4. إذا لم يكن هناك إعداد دخول مثالي وآمن، **يجب اختيار الاتجاه WAIT** (حالة انتظار وعدم دخول أي صفقة لحماية رأس المال).
 
 التنسيق الإجباري للإجابة:
 🎯 **تحليل صفقات المؤسسات الذكية ({symbol})**
@@ -90,12 +91,12 @@ def get_professional_ict_analysis(symbol: str, price: float, candles_text: str) 
 📌 **الاتجاه الفني:** [BUY / SELL / WAIT]
 💵 **السعر الحالي المباشر:** {price}
 
-🎯 **TP1:** [السعر]
-🎯 **TP2:** [السعر]
-🛑 **SL:** [السعر]
+🎯 **TP1:** [السعر أو N/A]
+🎯 **TP2:** [السعر أو N/A]
+🛑 **SL:** [السعر أو N/A]
 
 💡 **فلسفة التحليل (ICT / SMC):**
-[تحليل فني مختصر ومباشر يوضح السبب]
+[تحليل فني دقيق ومختصر يوضح سبب اختيار BUY أو SELL أو لماذا تم اختيار WAIT]
 """
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
@@ -114,24 +115,19 @@ def get_professional_ict_analysis(symbol: str, price: float, candles_text: str) 
 
 # --- 5. أوامر بوت التلغرام ---
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🧠 **أهلاً بك في بوت تحليل المؤسسات (ICT & SMC)**\n\n"
-        "البوت جاهز لإعطاء تحليلات دقيقة مبنية على السيولة والشارت.\n"
-        "أرسل الأمر للتحليل الفوري:\n`/analyze GOLD`", 
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text("🧠 **أهلاً بك في بوت التحليل الاحترافي (ICT & SMC)**\n\nالبوت يحلل السوق بالكامل ويعطيك صفقات BUY أو SELL أو يوجهك لـ WAIT عند غياب الفرص الآمنة.\n\nأرسل الأمر للتحليل الفوري:\n`/analyze GOLD`", parse_mode="Markdown")
 
 async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         symbol = context.args[0] if context.args else "GOLD"
-        msg = await update.message.reply_text(f"🔍 جاري قراءة السيولة وهيكل الشارت لـ {symbol}...")
+        msg = await update.message.reply_text(f"🔍 جاري فحص بنية السوق والسيولة لـ {symbol}...")
         
         data = fetch_market_data()
         analysis_result = get_professional_ict_analysis(data["symbol"], data["price"], data["candles_text"])
         
         await msg.edit_text(analysis_result, parse_mode="Markdown")
     except Exception as e:
-        await update.message.reply_text(f"حدث خطأ أثناء فحص السوق: {e}")
+        await update.message.reply_text(f"حدث خطأ: {e}")
 
 # --- 6. التشغيل الرئيسي ---
 if __name__ == "__main__":
@@ -145,5 +141,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("analyze", analyze_cmd))
 
-    print("Stable ICT/SMC Bot is running...")
+    print("Smart ICT Bot is running...")
     app.run_polling(drop_pending_updates=True)
