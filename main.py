@@ -34,7 +34,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")        # اختياري: مر�
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")  # اختياري: تأكيد Claude
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5-5")
 
-VERSION = "v4-ema-bias"
+VERSION = "v5-multischool"
 MIN_RR = 1.5          # أقل نسبة ربح/خسارة مقبولة للصفقة
 MAX_RISK_ATR = 3.0    # أقصى حجم للستوب بوحدات ATR
 
@@ -200,7 +200,7 @@ def watch_levels(data: dict) -> list:
 
 
 # =====================================================
-def build_signal(data: dict) -> dict:
+def smc_signal(data: dict) -> dict:
     ltf, htf, price = data["ltf"], data["htf"], data["price"]
     a = atr(ltf)
 
@@ -239,6 +239,7 @@ def build_signal(data: dict) -> dict:
     else:
         return {"dir": "WAIT", "why": "الاتجاه العام غير واضح (الساعة متذبذبة ولا يوجد تأكيد من EMA50 وهيكل 15m).", "facts": facts}
 
+    facts["bias"] = bias
     if (bias == "BUY" and pos > 0.65) or (bias == "SELL" and pos < 0.35):
         return {"dir": "WAIT", "why": f"الاتجاه {bias} لكن السعر بعيد عن منطقة الدخول المناسبة (انتظر تصحيحاً نحو OB/FVG).", "facts": facts}
 
@@ -284,6 +285,247 @@ def build_signal(data: dict) -> dict:
         "rr": round(abs(tp1 - entry) / risk, 2),
         "why": f"اتجاه {htf_struct} على 1H، هيكل 15m: {ltf_struct}، منطقة الدخول {facts['entry_zone']}.",
         "facts": facts,
+    }
+
+
+# =====================================================
+# (section)
+# =====================================================
+SCORE_MIN = 0.35
+WEIGHTS = {"ICT/SMC": 2.0, "الاتجاه EMA": 1.5, "الزخم RSI/MACD": 1.0,
+           "دعم/مقاومة+فيبو": 1.0, "حركة السعر": 0.8, "بولينجر": 0.5}
+
+
+def clamp(v, lo=-1.0, hi=1.0):
+    return max(lo, min(hi, v))
+
+
+def ema_series(values, n):
+    k = 2 / (n + 1)
+    out = [values[0]]
+    for v in values[1:]:
+        out.append(v * k + out[-1] * (1 - k))
+    return out
+
+
+def rsi(closes, n=14):
+    gains, losses = [], []
+    for i in range(1, len(closes)):
+        d = closes[i] - closes[i - 1]
+        gains.append(max(d, 0))
+        losses.append(max(-d, 0))
+    ag, al = sum(gains[:n]) / n, sum(losses[:n]) / n
+    for i in range(n, len(gains)):
+        ag = (ag * (n - 1) + gains[i]) / n
+        al = (al * (n - 1) + losses[i]) / n
+    if al == 0:
+        return 100.0
+    return 100 - 100 / (1 + ag / al)
+
+
+def macd_hist(closes):
+    e12, e26 = ema_series(closes, 12), ema_series(closes, 26)
+    macd = [a - b for a, b in zip(e12, e26)]
+    sig = ema_series(macd, 9)
+    return macd[-1] - sig[-1], macd[-2] - sig[-2]
+
+
+def pct_b(closes, n=20, k=2):
+    w = closes[-n:]
+    m = sum(w) / n
+    sd = (sum((x - m) ** 2 for x in w) / n) ** 0.5
+    if sd == 0:
+        return 0.5
+    return (closes[-1] - (m - k * sd)) / (2 * k * sd)
+
+
+def sr_levels(candles, k=3, keep=8):
+    h, l = swings(candles, k)
+    return sorted([x[1] for x in h[-keep:]] + [x[1] for x in l[-keep:]])
+
+
+def vote_smc(smc):
+    if smc["dir"] == "BUY":
+        return 1.0, "إشارة ICT/SMC: BUY"
+    if smc["dir"] == "SELL":
+        return -1.0, "إشارة ICT/SMC: SELL"
+    b = smc["facts"].get("bias")
+    if b == "BUY":
+        return 0.5, "اتجاه شراء بدون منطقة دخول"
+    if b == "SELL":
+        return -0.5, "اتجاه بيع بدون منطقة دخول"
+    return 0.0, "لا اتجاه واضح"
+
+
+def vote_trend(htf):
+    c = [x["c"] for x in htf]
+    e20, e50 = ema_series(c, 20), ema_series(c, 50)
+    p, slope = c[-1], e50[-1] - e50[-6]
+    if p > e20[-1] > e50[-1] and slope > 0:
+        return 1.0, "السعر>EMA20>EMA50 والميل صاعد"
+    if p < e20[-1] < e50[-1] and slope < 0:
+        return -1.0, "السعر<EMA20<EMA50 والميل هابط"
+    if p > e50[-1]:
+        return 0.5, "السعر فوق EMA50"
+    if p < e50[-1]:
+        return -0.5, "السعر تحت EMA50"
+    return 0.0, "-"
+
+
+def vote_momentum(ltf, htf):
+    c15, c1h = [x["c"] for x in ltf], [x["c"] for x in htf]
+    r15, r1h = rsi(c15), rsi(c1h)
+    h0, h1 = macd_hist(c1h)
+    v = 0.0
+    v += 0.4 if r1h > 52 else -0.4 if r1h < 48 else 0
+    v += 0.3 if r15 > 52 else -0.3 if r15 < 48 else 0
+    if h0 > 0 and h0 > h1:
+        v += 0.3
+    elif h0 < 0 and h0 < h1:
+        v -= 0.3
+    if r1h > 75 or r15 > 80:
+        v = min(v, 0)      # تشبع شرائي: لا ملاحقة
+    if r1h < 25 or r15 < 20:
+        v = max(v, 0)      # تشبع بيعي
+    return clamp(v), f"RSI 1H {r1h:.0f} | 15m {r15:.0f} | MACD {'↑' if h0 > h1 else '↓'}"
+
+
+def vote_sr_fib(data, a15, a1h):
+    price, htf = data["price"], data["htf"]
+    levels = sr_levels(htf) + sr_levels(data["ltf"])
+    tol = max(1.5 * a15, 0.4 * a1h)
+    sup = [x for x in levels if x <= price]
+    res = [x for x in levels if x > price]
+    v, notes = 0.0, []
+    if sup and price - max(sup) <= tol:
+        v += 1
+        notes.append(f"قرب دعم {max(sup):.1f}")
+    if res and min(res) - price <= tol:
+        v -= 1
+        notes.append(f"قرب مقاومة {min(res):.1f}")
+    seg = htf[-80:]
+    hi_i = max(range(len(seg)), key=lambda i: seg[i]["h"])
+    lo_i = min(range(len(seg)), key=lambda i: seg[i]["l"])
+    hi, lo = seg[hi_i]["h"], seg[lo_i]["l"]
+    if hi - lo > 2 * a1h:
+        up = hi_i > lo_i
+        retr = (hi - price) / (hi - lo) if up else (price - lo) / (hi - lo)
+        f = 1.0 if 0.5 <= retr <= 0.786 else 0.5 if 0.382 <= retr < 0.5 else 0.0
+        if f:
+            v += f if up else -f
+            notes.append(f"فيبو {retr:.2f}")
+    return clamp(v), " | ".join(notes) or "لا مستوى قريب"
+
+
+def _candle_pattern(p, c):
+    body, rng = abs(c["c"] - c["o"]), c["h"] - c["l"]
+    if rng <= 0:
+        return 0
+    lower = min(c["o"], c["c"]) - c["l"]
+    upper = c["h"] - max(c["o"], c["c"])
+    pbody = abs(p["c"] - p["o"])
+    if p["c"] < p["o"] and c["c"] > c["o"] and c["c"] >= p["o"] and c["o"] <= p["c"] and body > pbody:
+        return 1
+    if p["c"] > p["o"] and c["c"] < c["o"] and c["c"] <= p["o"] and c["o"] >= p["c"] and body > pbody:
+        return -1
+    if lower >= 2 * max(body, 0.05 * rng) and upper <= max(body, 0.15 * rng) and (c["c"] - c["l"]) / rng > 0.6:
+        return 1   # مطرقة
+    if upper >= 2 * max(body, 0.05 * rng) and lower <= max(body, 0.15 * rng) and (c["h"] - c["c"]) / rng > 0.6:
+        return -1  # شهاب
+    return 0
+
+
+def vote_price_action(ltf, htf):
+    a = _candle_pattern(ltf[-2], ltf[-1])
+    b = _candle_pattern(ltf[-3], ltf[-2])
+    c = _candle_pattern(htf[-2], htf[-1])
+    v = 0.6 * a + 0.2 * b + 0.6 * c
+    names = {1: "صاعد", -1: "هابط", 0: "-"}
+    return clamp(v), f"15m: {names[a]} | 1H: {names[c]}"
+
+
+def vote_bollinger(ltf):
+    pb = pct_b([x["c"] for x in ltf])
+    v = 0.6 if pb < 0.1 else -0.6 if pb > 0.9 else 0.3 if pb < 0.25 else -0.3 if pb > 0.75 else 0.0
+    return v, f"%B = {pb:.2f}"
+
+
+def build_signal(data: dict) -> dict:
+    ltf, htf, price = data["ltf"], data["htf"], data["price"]
+    a15, a1h = atr(ltf), atr(htf)
+    smc = smc_signal(data)
+
+    results = [
+        ("ICT/SMC",) + vote_smc(smc),
+        ("الاتجاه EMA",) + vote_trend(htf),
+        ("الزخم RSI/MACD",) + vote_momentum(ltf, htf),
+        ("دعم/مقاومة+فيبو",) + vote_sr_fib(data, a15, a1h),
+        ("حركة السعر",) + vote_price_action(ltf, htf),
+        ("بولينجر",) + vote_bollinger(ltf),
+    ]
+    total_w = sum(WEIGHTS.values())
+    score = sum(WEIGHTS[n] * v for n, v, _ in results) / total_w
+
+    facts = dict(smc["facts"])
+    facts["score"] = round(score, 2)
+    votes = [{"school": n, "vote": round(v, 2), "note": t} for n, v, t in results]
+    base = {"facts": facts, "votes": votes, "score": round(score, 2)}
+
+    if abs(score) < SCORE_MIN:
+        return {**base, "dir": "WAIT",
+                "why": f"توافق المدارس ضعيف: الدرجة {score:+.2f} (المطلوب ±{SCORE_MIN})."}
+
+    direction = "BUY" if score > 0 else "SELL"
+    sign = 1 if score > 0 else -1
+    agree = sum(1 for _, v, _ in results if v * sign >= 0.3)
+    if agree < 3:
+        return {**base, "dir": "WAIT", "why": f"اتفقت {agree} مدارس فقط من 6 (المطلوب 3 على الأقل)."}
+    if results[0][1] * sign < 0 or results[1][1] * sign < 0:
+        return {**base, "dir": "WAIT", "why": "تعارض مع ICT/SMC أو مع الاتجاه العام (EMA)."}
+
+    # ---- المستويات ----
+    if smc["dir"] == direction:
+        entry, sl, tp1, tp2 = smc["entry"], smc["sl"], smc["tp1"], smc["tp2"]
+        mode = smc.get("mode", "")
+        risk = abs(entry - sl)
+    else:
+        mode = "دخول فوري بالسعر الحالي (توافق مدارس)"
+        entry = price
+        h, l = swings(ltf)
+        if direction == "BUY":
+            cand = [x[1] for x in l if x[1] < price]
+            sl = (cand[-1] if cand else price) - 0.3 * a15
+            risk = price - sl
+        else:
+            cand = [x[1] for x in h if x[1] > price]
+            sl = (cand[-1] if cand else price) + 0.3 * a15
+            risk = sl - price
+        if risk < 1.0 * a15:
+            risk = 1.0 * a15
+            sl = price - risk if direction == "BUY" else price + risk
+        if risk > 3.5 * a15:
+            return {**base, "dir": "WAIT", "why": "الستوب بعيد جداً مقارنة بالتذبذب؛ المخاطرة غير مناسبة."}
+        tp1 = price + sign * 1.5 * risk
+        tp2 = price + sign * 3.0 * risk
+        # هل يوجد حاجز (دعم/مقاومة على الساعة) يقطع الطريق قبل 1R؟
+        lv = sr_levels(htf)
+        ahead = [x for x in lv if (x - price) * sign > 0]
+        if ahead:
+            nearest = min(ahead, key=lambda x: abs(x - price))
+            if abs(nearest - price) < 1.0 * risk:
+                return {**base, "dir": "WAIT",
+                        "why": f"حاجز قريب عند {nearest:.2f} يحدّ من الربح قبل 1R."}
+
+    return {
+        **base,
+        "dir": direction,
+        "entry": round(entry, 2),
+        "mode": mode,
+        "sl": round(sl, 2),
+        "tp1": round(tp1, 2),
+        "tp2": round(tp2, 2),
+        "rr": round(abs(tp1 - entry) / max(risk, 1e-9), 2),
+        "why": f"توافق {agree} مدارس من 6، الدرجة {score:+.2f}.",
     }
 
 
@@ -394,6 +636,12 @@ def format_message(data, sig, notes):
         lines += ["🎯 TP1: N/A", "🎯 TP2: N/A", "🛑 SL: N/A"]
 
     lines += ["", f'💡 السبب: {sig["why"]}', ""]
+    if sig.get("votes"):
+        lines.append(f'🏫 المدارس (الدرجة {sig["score"]:+.2f}):')
+        for v in sig["votes"]:
+            arrow = "🟢" if v["vote"] >= 0.3 else "🔴" if v["vote"] <= -0.3 else "⚪"
+            lines.append(f'{arrow} {v["school"]}: {v["vote"]:+.1f} — {v["note"]}')
+        lines.append("")
     lines.append(
         f'📊 1H: {f.get("htf_structure")} | 15m: {f.get("ltf_structure")} | '
         f'ATR: {f.get("atr15m")} | EMA50(1H): {f.get("htf_ema50")}'
