@@ -43,7 +43,7 @@ MAX_RISK_ATR = 3.0    # أقصى حجم للستوب بوحدات ATR
 # (section)
 # =====================================================
 def _binance_klines(interval: str, limit: int = 150):
-    for host in ("https://api.binance.com", "https://api.binance.us"):
+    for host in ("https://data-api.binance.vision", "https://api.binance.com"):
         try:
             r = requests.get(
                 f"{host}/api/v3/klines",
@@ -101,29 +101,53 @@ def resample(candles, hours):
     return out
 
 
-def fetch_market_data():
-    source = "binance"
-    ltf = _binance_klines("15m", 150)
-    if not ltf:
-        source = "yahoo"
+def _good(candles):
+    """Reject dead feeds: flat candles or almost no movement."""
+    if not candles or len(candles) < 30:
+        return False
+    tail = candles[-40:]
+    flat = sum(1 for x in tail if x["h"] == x["l"]) / len(tail)
+    return flat < 0.3 and atr(candles) >= 0.15
+
+
+def _from_source(name):
+    if name == "binance":
+        ltf = _binance_klines("15m", 150)
+        h1 = _binance_klines("1h", 500)
+        d1 = _binance_klines("1d", 200)
+    else:
         ltf = _yahoo_klines("15m", "5d")
-    h1 = _binance_klines("1h", 500) or _yahoo_klines("60m", "3mo")
-    if not ltf or not h1:
+        h1 = _yahoo_klines("60m", "3mo")
+        d1 = _yahoo_klines("1d", "1y")
+    if _good(ltf) and _good(h1):
+        return ltf, h1, d1 if _good(d1) else None
+    print(f"Source {name} rejected (missing or flat data)")
+    return None
+
+
+def fetch_market_data():
+    got, source = None, None
+    for name in ("binance", "yahoo"):   # one consistent source for all timeframes
+        got = _from_source(name)
+        if got:
+            source = name
+            break
+    if not got:
         return None
-    d1 = _binance_klines("1d", 200) or _yahoo_klines("1d", "1y")
+    ltf, h1, d1 = got
 
     htf = h1[-150:]
     h4 = resample(h1, 4)[-120:]
 
     price = ltf[-1]["c"]
-    try:
-        p = requests.get("https://api.gold-api.com/price/XAU", timeout=4).json()
-        live = float(p.get("price", 0))
-        # accept the live price only if it is close to the candles (< 1.5% apart)
-        if live > 0 and abs(live - price) / price < 0.015:
-            price = round(live, 2)
-    except Exception as e:
-        print(f"Price API error: {e}")
+    if source == "binance":   # PAXG tracks spot gold; futures (Yahoo) carry a premium, so keep their own close
+        try:
+            p = requests.get("https://api.gold-api.com/price/XAU", timeout=4).json()
+            live = float(p.get("price", 0))
+            if live > 0 and abs(live - price) / price < 0.005:
+                price = round(live, 2)
+        except Exception as e:
+            print(f"Price API error: {e}")
 
     age_min = None
     if ltf[-1].get("t"):
