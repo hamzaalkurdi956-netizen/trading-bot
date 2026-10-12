@@ -102,7 +102,11 @@ def resample(candles, hours):
 
 
 def fetch_market_data():
-    ltf = _binance_klines("15m", 150) or _yahoo_klines("15m", "5d")
+    source = "binance"
+    ltf = _binance_klines("15m", 150)
+    if not ltf:
+        source = "yahoo"
+        ltf = _yahoo_klines("15m", "5d")
     h1 = _binance_klines("1h", 500) or _yahoo_klines("60m", "3mo")
     if not ltf or not h1:
         return None
@@ -121,7 +125,11 @@ def fetch_market_data():
     except Exception as e:
         print(f"Price API error: {e}")
 
+    age_min = None
+    if ltf[-1].get("t"):
+        age_min = round((time.time() * 1000 - ltf[-1]["t"] - 900_000) / 60000)
     return {"symbol": "XAU/USD", "price": price, "ltf": ltf, "htf": htf,
+            "source": source, "age_min": age_min,
             "h4": h4 if len(h4) >= 30 else None,
             "d1": d1 if d1 and len(d1) >= 55 else None}
 
@@ -482,6 +490,9 @@ def vote_bollinger(ltf):
 def build_signal(data: dict) -> dict:
     ltf, htf, price = data["ltf"], data["htf"], data["price"]
     a15, a1h = atr(ltf), atr(htf)
+    if a15 < 0.15 or (data.get("age_min") or 0) > 90:
+        return {"dir": "WAIT", "facts": {"atr15m": round(a15, 2)}, "votes": [], "score": 0.0,
+                "why": "بيانات غير موثوقة: الشموع شبه مسطحة أو قديمة (تحقق من مصدر البيانات)."}
     smc = smc_signal(data)
 
     results = [
@@ -954,7 +965,7 @@ def format_message(data, sig, notes):
     )
     if notes:
         lines += [""] + notes
-    lines += ["", f'🔖 النسخة: {VERSION} | شموع: {len(data["ltf"])}/{len(data["htf"])}', "⚠️ تحليل آلي تعليمي وليس نصيحة مالية. التزم بإدارة رأس المال."]
+    lines += ["", f'🔖 النسخة: {VERSION} | المصدر: {data.get("source")} | عمر آخر شمعة: {data.get("age_min")} د | شموع: {len(data["ltf"])}/{len(data["htf"])}', "⚠️ تحليل آلي تعليمي وليس نصيحة مالية. التزم بإدارة رأس المال."]
     return "\n".join(lines)
 
 
