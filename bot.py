@@ -18,7 +18,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"Smart ICT/SMC Bot is running!")
+        self.wfile.write(b"Smart ICT/SMC + Gann Bot is running!")
 
     def log_message(self, format, *args):
         return
@@ -37,9 +37,10 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")  
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5-5")
 
-VERSION = "v7-pro-sqlite"
+VERSION = "v8-pro-gann"
 MIN_RR = 1.5          
 MAX_RISK_ATR = 3.0    
+MAX_SL_POINTS = 40.0  # أقصى مسافة مسموحة لوقف الخسارة بالنقاط
 
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 DB_FILE = os.path.join(DATA_DIR, "bot_data.db")
@@ -197,7 +198,7 @@ def fetch_market_data():
 
 
 # =====================================================
-# Technical Indicators & Analysis
+# Technical Indicators & Analysis (Including Gann Square of 9)
 # =====================================================
 def atr(candles, n=14):
     trs = []
@@ -239,6 +240,23 @@ def structure(candles):
     if lh and ll:
         return "BEAR", highs, lows
     return "RANGE", highs, lows
+
+
+def calc_gann_levels(price):
+    """حساب مستويات الدعم والمقاومة بناءً على مربع التسعة جان (Gann Square of 9)."""
+    if price <= 0:
+        return [], []
+    root = price ** 0.5
+    # خطوات الزوايا (كل 0.25 تمثل 90 درجة في الجذر التربيعي لجان)
+    steps = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0]
+    supports, resistances = [], []
+    for s in steps:
+        sup = (root - s) ** 2
+        if sup > 0:
+            supports.append(round(sup, 2))
+        res = (root + s) ** 2
+        resistances.append(round(res, 2))
+    return sorted(supports, reverse=True), sorted(resistances)
 
 
 def find_fvgs(candles, lookback=40):
@@ -361,6 +379,9 @@ def smc_signal(data: dict) -> dict:
         risk = sl - entry
         tp1, tp2 = entry - 1.5 * risk, entry - 3 * risk
 
+    if risk > MAX_SL_POINTS:
+        return {"dir": "WAIT", "why": f"الستوب واسع جداً ({round(risk, 1)} نقطة).", "facts": facts}
+
     if risk <= 0 or risk > MAX_RISK_ATR * a:
         return {"dir": "WAIT", "why": "المخاطرة غير مناسبة أو الستوب بعيد.", "facts": facts}
 
@@ -378,9 +399,16 @@ def smc_signal(data: dict) -> dict:
 
 
 SCORE_MIN = 0.35
-WEIGHTS = {"ICT/SMC": 2.0, "الاتجاه EMA": 1.5, "الزخم RSI/MACD": 1.0,
-           "دعم/مقاومة+فيبو": 1.0, "حركة السعر": 0.8, "بولينجر": 0.5,
-           "الإطار الأكبر 4H/D": 1.5}
+WEIGHTS = {
+    "ICT/SMC": 2.0, 
+    "الاتجاه EMA": 1.5, 
+    "الزخم RSI/MACD": 1.0,
+    "دعم/مقاومة+فيبو": 1.0, 
+    "مربع جان (Gann)": 1.2,  # وزن مخصص لمربع جان
+    "حركة السعر": 0.8, 
+    "بولينجر": 0.5,
+    "الإطار الأكبر 4H/D": 1.5
+}
 
 
 def clamp(v, lo=-1.0, hi=1.0):
@@ -489,6 +517,29 @@ def vote_sr_fib(data, a15, a1h):
     return clamp(v), " | ".join(notes) or "لا مستوى"
 
 
+def vote_gann(data):
+    """تقييم مربع جان: فحص وجود السعر قرب مستويات دعم أو مقاومة زاوية جان."""
+    price = data["price"]
+    a15 = atr(data["ltf"])
+    supports, resistances = calc_gann_levels(price)
+    
+    tol = 1.5 * a15
+    v = 0.0
+    notes = []
+    
+    near_sup = [s for s in supports if abs(price - s) <= tol]
+    near_res = [r for r in resistances if abs(price - r) <= tol]
+    
+    if near_sup:
+        v += 1.0
+        notes.append(f"دعم جان عند {near_sup[0]}")
+    if near_res:
+        v -= 1.0
+        notes.append(f"مقاومة جان عند {near_res[0]}")
+        
+    return clamp(v), " | ".join(notes) or "خارج مستويات جان الرئيسية"
+
+
 def _candle_pattern(p, c):
     body, rng = abs(c["c"] - c["o"]), c["h"] - c["l"]
     if rng <= 0:
@@ -540,6 +591,7 @@ def build_signal(data: dict) -> dict:
         ("الاتجاه EMA",) + vote_trend(htf),
         ("الزخم RSI/MACD",) + vote_momentum(ltf, htf),
         ("دعم/مقاومة+فيبو",) + vote_sr_fib(data, a15, a1h),
+        ("مربع جان (Gann)",) + vote_gann(data),
         ("حركة السعر",) + vote_price_action(ltf, htf),
         ("بولينجر",) + vote_bollinger(ltf),
         ("الإطار الأكبر 4H/D",) + vote_higher(data),
@@ -569,6 +621,9 @@ def build_signal(data: dict) -> dict:
         tp1 = price + (1 if direction == "BUY" else -1) * 1.5 * risk
         tp2 = price + (1 if direction == "BUY" else -1) * 3.0 * risk
 
+    if risk > MAX_SL_POINTS:
+        return {**base, "dir": "WAIT", "why": f"الستوب واسع جداً ({round(risk, 1)} نقطة)."}
+
     return {
         **base,
         "dir": direction,
@@ -578,7 +633,7 @@ def build_signal(data: dict) -> dict:
         "tp1": round(tp1, 2),
         "tp2": round(tp2, 2),
         "rr": round(abs(tp1 - entry) / max(risk, 1e-9), 2),
-        "why": f"توافق المدارس، الدرجة {score:+.2f}.",
+        "why": f"توافق المدارس مع مربع جان، الدرجة {score:+.2f}.",
     }
 
 
@@ -714,7 +769,7 @@ def stats_text():
         return "📊 لا توجد صفقات مسجلة بعد."
     wins = [s for s in done if s["r"] > 0]
     losses = [s for s in done if s["r"] < 0]
-    lines = ["📊 إحصائيات الصفقات (SQLite)", "────────────────",
+    lines = ["📊 إحصائيات الصفقات (Gann + SQLite)", "────────────────",
              f"المسجلة: {len(sigs)} | المفتوحة: {len(active)} | المغلقة: {len(done)}"]
     if done:
         gp = sum(s["r"] for s in wins)
@@ -730,20 +785,6 @@ def stats_text():
         res = s["result"] or s["status"]
         lines.append(f'#{s["id"]} {s["dir"]} @ {s["entry"]} → {res}')
     return "\n".join(lines)
-
-
-def lot_size(sig):
-    try:
-        bal = float(os.environ.get("ACCOUNT_BALANCE", "0"))
-        pct = float(os.environ.get("RISK_PCT", "1"))
-    except ValueError:
-        return None
-    if bal <= 0:
-        return None
-    per_lot_loss = abs(sig["entry"] - sig["sl"]) * 100
-    if per_lot_loss <= 0:
-        return None
-    return round(bal * pct / 100 / per_lot_loss, 2), pct, bal
 
 
 # =====================================================
@@ -797,7 +838,7 @@ def scanner_loop():
 def format_message(data, sig, notes):
     f = sig["facts"]
     lines = [
-        f'🎯 تحليل ICT/SMC ({data["symbol"]})',
+        f'🎯 تحليل ICT/SMC + Gann ({data["symbol"]})',
         "────────────────",
         f'📌 الاتجاه: {sig["dir"]}',
         f'💵 السعر الحالي: {data["price"]}',
@@ -810,10 +851,6 @@ def format_message(data, sig, notes):
             f'🛑 SL: {sig["sl"]}',
             f'⚖️ R:R: 1:{sig["rr"]}',
         ]
-    if sig["dir"] in ("BUY", "SELL"):
-        ls = lot_size(sig)
-        if ls:
-            lines.append(f"📦 حجم مقترح: {ls[0]} لوت (مخاطرة {ls[1]:g}% من {ls[2]:g}$)")
     lines += ["", f'💡 السبب: {sig["why"]}', ""]
     if sig.get("votes"):
         lines.append(f'🏫 المدارس (الدرجة {sig["score"]:+.2f}):')
@@ -822,13 +859,13 @@ def format_message(data, sig, notes):
             lines.append(f'{arrow} {v["school"]}: {v["vote"]:+.1f}')
     if notes:
         lines += [""] + notes
-    lines += ["", f'🔖 النسخة: {VERSION} | SQLite متصل']
+    lines += ["", f'🔖 النسخة: {VERSION} | مستويات جان مفعلة']
     return "\n".join(lines)
 
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🧠 بوت التحليل المتطور (مع SQLite وتأمين الصفقات Breakeven)\n\n"
+        "🧠 بوت التحليل المتطور (مع مربع جان وسلاسل SQLite)\n\n"
         "/analyze  تحليل فوري\n"
         "/subscribe  اشتراك بالتنبيهات\n"
         "/unsubscribe  إيقاف التنبيهات\n"
@@ -840,7 +877,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        msg = await update.message.reply_text("🔍 جاري فحص السوق عبر SQLite...")
+        msg = await update.message.reply_text("🔍 جاري فحص السوق ومستويات جان...")
         data = fetch_market_data()
         if not data:
             await msg.edit_text("❌ تعذّر جلب البيانات.")
@@ -914,5 +951,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("pause", pause_cmd))
     app.add_handler(CommandHandler("resume", resume_cmd))
 
-    print("Smart ICT Bot with SQLite is running...")
+    print("Smart ICT Bot with Gann Square & SQLite is running...")
     app.run_polling(drop_pending_updates=True)
