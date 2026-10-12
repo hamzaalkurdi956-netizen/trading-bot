@@ -37,7 +37,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")  
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5-5")
 
-VERSION = "v8-pro-gann"
+VERSION = "v8.1-pro-gann"
 MIN_RR = 1.5          
 MAX_RISK_ATR = 3.0    
 MAX_SL_POINTS = 40.0  # أقصى مسافة مسموحة لوقف الخسارة بالنقاط
@@ -243,11 +243,9 @@ def structure(candles):
 
 
 def calc_gann_levels(price):
-    """حساب مستويات الدعم والمقاومة بناءً على مربع التسعة جان (Gann Square of 9)."""
     if price <= 0:
         return [], []
     root = price ** 0.5
-    # خطوات الزوايا (كل 0.25 تمثل 90 درجة في الجذر التربيعي لجان)
     steps = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0]
     supports, resistances = [], []
     for s in steps:
@@ -289,22 +287,6 @@ def find_order_blocks(candles, a, lookback=40):
             if not any(x["c"] > c["h"] for x in after):
                 res.append({"type": "SELL", "low": c["l"], "high": c["h"], "kind": "OB"})
     return res
-
-
-def watch_levels(data: dict) -> list:
-    ltf, price = data["ltf"], data["price"]
-    a = atr(ltf)
-    zones = find_fvgs(ltf, 80) + find_order_blocks(ltf, a, 80)
-    buys = [z for z in zones if z["type"] == "BUY" and z["high"] <= price]
-    sells = [z for z in zones if z["type"] == "SELL" and z["low"] >= price]
-    out = []
-    if buys:
-        z = max(buys, key=lambda x: x["high"])
-        out.append(f'👀 BUY عند: {z["kind"]} {round(z["low"], 2)}-{round(z["high"], 2)}')
-    if sells:
-        z = min(sells, key=lambda x: x["low"])
-        out.append(f'👀 SELL عند: {z["kind"]} {round(z["low"], 2)}-{round(z["high"], 2)}')
-    return out
 
 
 def smc_signal(data: dict) -> dict:
@@ -404,7 +386,7 @@ WEIGHTS = {
     "الاتجاه EMA": 1.5, 
     "الزخم RSI/MACD": 1.0,
     "دعم/مقاومة+فيبو": 1.0, 
-    "مربع جان (Gann)": 1.2,  # وزن مخصص لمربع جان
+    "مربع جان (Gann)": 1.2, 
     "حركة السعر": 0.8, 
     "بولينجر": 0.5,
     "الإطار الأكبر 4H/D": 1.5
@@ -518,25 +500,20 @@ def vote_sr_fib(data, a15, a1h):
 
 
 def vote_gann(data):
-    """تقييم مربع جان: فحص وجود السعر قرب مستويات دعم أو مقاومة زاوية جان."""
     price = data["price"]
     a15 = atr(data["ltf"])
     supports, resistances = calc_gann_levels(price)
-    
     tol = 1.5 * a15
     v = 0.0
     notes = []
-    
     near_sup = [s for s in supports if abs(price - s) <= tol]
     near_res = [r for r in resistances if abs(price - r) <= tol]
-    
     if near_sup:
         v += 1.0
         notes.append(f"دعم جان عند {near_sup[0]}")
     if near_res:
         v -= 1.0
         notes.append(f"مقاومة جان عند {near_res[0]}")
-        
     return clamp(v), " | ".join(notes) or "خارج مستويات جان الرئيسية"
 
 
@@ -674,6 +651,7 @@ def record_signal(sig, data):
         return ex, False
     with _lock:
         with sqlite3.connect(DB_FILE) as conn:
+            conn.row_factory = sqlite3.Row  # <--- حل مشكلة الخطأ البرمجي هنا
             cur = conn.cursor()
             last = data["ltf"][-1].get("t") or int(time.time() * 1000)
             limit = "Limit" in sig.get("mode", "")
@@ -685,7 +663,8 @@ def record_signal(sig, data):
             sig_id = cur.lastrowid
             
             cur.execute("SELECT * FROM signals WHERE id = ?", (sig_id,))
-            s = dict(cur.fetchone())
+            row = cur.fetchone()
+            s = dict(row) if row else {}
     return s, True
 
 
