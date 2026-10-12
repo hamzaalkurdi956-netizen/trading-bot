@@ -34,6 +34,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")        # اختياري: مر�
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")  # اختياري: تأكيد Claude
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5-5")
 
+VERSION = "v3-relaxed"
 MIN_RR = 1.5          # أقل نسبة ربح/خسارة مقبولة للصفقة
 MAX_RISK_ATR = 3.0    # أقصى حجم للستوب بوحدات ATR
 
@@ -377,7 +378,7 @@ def format_message(data, sig, notes):
     )
     if notes:
         lines += [""] + notes
-    lines += ["", "⚠️ تحليل آلي تعليمي وليس نصيحة مالية. التزم بإدارة رأس المال."]
+    lines += ["", f'🔖 النسخة: {VERSION} | شموع: {len(data["ltf"])}/{len(data["htf"])}', "⚠️ تحليل آلي تعليمي وليس نصيحة مالية. التزم بإدارة رأس المال."]
     return "\n".join(lines)
 
 
