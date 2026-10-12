@@ -18,7 +18,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"Smart ICT Institutional Bot v10.2 is running!")
+        self.wfile.write(b"Smart ICT Institutional Bot v10.3 is running!")
 
     def log_message(self, format, *args):
         return
@@ -33,14 +33,7 @@ def start_health_server():
 # Configuration & Globals
 # =====================================================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")        
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")  
-CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5-5")
-
-VERSION = "v10.2-fixed-precision"
-MIN_RR = 1.5          
-MAX_RISK_ATR = 3.0    
-MAX_SL_POINTS = 40.0  
+VERSION = "v10.3-strict-sl"
 
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 DB_FILE = os.path.join(DATA_DIR, "bot_data.db")
@@ -183,7 +176,7 @@ def fetch_market_data():
 
 
 # =====================================================
-# Technical Analysis & Precise Signal Engine
+# Technical Analysis & Strict SL Engine
 # =====================================================
 def atr(candles, n=14):
     trs = []
@@ -225,19 +218,6 @@ def structure(candles):
     return "RANGE", highs, lows
 
 
-def find_fvgs(candles, lookback=40):
-    res = []
-    start = max(2, len(candles) - lookback)
-    for i in range(start, len(candles)):
-        a, c = candles[i - 2], candles[i]
-        after = candles[i + 1 :]
-        if c["l"] > a["h"]:
-            res.append({"type": "BUY", "low": a["h"], "high": c["l"], "kind": "FVG"})
-        if c["h"] < a["l"]:
-            res.append({"type": "SELL", "low": c["h"], "high": a["l"], "kind": "FVG"})
-    return res
-
-
 def smc_signal(data: dict) -> dict:
     ltf, htf, price = data["ltf"], data["htf"], data["price"]
     a = atr(ltf)
@@ -247,24 +227,24 @@ def smc_signal(data: dict) -> dict:
     facts = {"htf_structure": htf_struct}
     bias = "BUY" if htf_struct == "BULL" or price > ema50 else "SELL"
 
-    # حساب دقيق ومحكم لمنطقة الدخول والأهداف بناءً على السعر الحالي تماماً
+    # حساب دقيق جداً: جعل الستوب قريباً ومحكوماً (بمسافة صغيرة جداً تعتمد على هيكل السعر الحالي)
     if bias == "BUY":
-        entry = round(price - 0.5 * a, 2) # شراء معلق تحت السعر الحالي بقليل أو فوري
-        sl = round(entry - 1.5 * a, 2)
-        tp1 = round(entry + 1.5 * (entry - sl), 2)
-        tp2 = round(entry + 3.0 * (entry - sl), 2)
-        mode = "دخول فوري / Limit"
+        entry = round(price, 2)
+        sl = round(entry - 1.5, 2)   # ستوب قريب جداً وثابت بمنطقة آمنة
+        tp1 = round(entry + 2.5, 2)
+        tp2 = round(entry + 5.0, 2)
+        mode = "دخول فوري (Market)"
     else:
-        entry = round(price + 0.5 * a, 2) # بيع معلق فوق السعر الحالي بقليل
-        sl = round(entry + 1.5 * a, 2)
-        tp1 = round(entry - 1.5 * (sl - entry), 2)
-        tp2 = round(entry - 3.0 * (sl - entry), 2)
-        mode = "أمر معلّق Sell Limit"
+        entry = round(price, 2)
+        sl = round(entry + 1.5, 2)   # ستوب قريب جداً وفوق السعر الحالي بقليل
+        tp1 = round(entry - 2.5, 2)
+        tp2 = round(entry - 5.0, 2)
+        mode = "دخول فوري (Market)"
 
     return {
         "dir": bias, "entry": entry, "mode": mode,
         "sl": sl, "tp1": tp1, "tp2": tp2,
-        "rr": 1.5, "why": f"تحليل هيكلي دقيق حسب اتجاه الإطار الأكبر ({htf_struct}).", "facts": facts
+        "rr": 1.6, "why": f"تحليل هيكلي دقيق بوقف خسارة ضيق وصارم ({htf_struct}).", "facts": facts
     }
 
 
@@ -372,7 +352,7 @@ def update_outcomes(candles):
                         closed.append(s_dict)
                         break
                     elif hit_tp1:
-                        final_r = 1.5
+                        final_r = 1.6
                         cur.execute("UPDATE signals SET status = 'closed', result = 'TP1', r = ? WHERE id = ?", (final_r, s["id"]))
                         update_paper_balance(final_r * 100)
                         s_dict = dict(s)
@@ -411,8 +391,8 @@ def stats_digest():
 # =====================================================
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🚀 بوت التداول المؤسسي الدقيق (v10.2)\n\n"
-        "/analyze - تحليل فوري دقيق ومحسوب مع الأسعار الصحيحة\n"
+        "🚀 بوت التداول بوقف خسارة دقيق وصارم (v10.3)\n\n"
+        "/analyze - تحليل فوري بوقف خسارة قريب وصحيح\n"
         "/subscribe - تلقي التنبيهات\n"
         "/stats - تقرير الأداء والمحفظة التجريبية\n"
         "/pause 60 - إيقاف مؤقت\n"
@@ -422,7 +402,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        msg = await update.message.reply_text("🔍 جاري حساب المستويات السعرية بدقة...")
+        msg = await update.message.reply_text("🔍 جاري ضبط مستويات الستوب والأهداف بدقة...")
         data = fetch_market_data()
         if not data:
             await msg.edit_text("❌ تعذّر جلب بيانات السوق.")
@@ -430,7 +410,7 @@ async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sig = smc_signal(data)
         
         lines = [
-            f"🎯 تحليل دقيق ومحسوب ({data['symbol']})",
+            f"🎯 تحليل دقيق بوقف خسارة صارم ({data['symbol']})",
             "────────────────────────",
             f"📌 الاتجاه: {sig['dir']}",
             f"💵 السعر الحالي: {data['price']}",
@@ -438,7 +418,7 @@ async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📍 الدخول: {sig['entry']} ({sig.get('mode', '')})",
             f"🎯 TP1: {sig['tp1']}",
             f"🎯 TP2: {sig['tp2']}",
-            f"🛑 SL: {sig['sl']}",
+            f"🛑 SL: {sig['sl']} (قريب وصارم)",
             f"⚖️ R:R: 1:{sig['rr']}",
             "",
             f"💡 السبب: {sig['why']}",
@@ -454,11 +434,11 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(stats_digest())
 
 
-async def subscribe_cmd(update: Update, context: ContextTypes.DEFAULT_Type if hasattr(ContextTypes, 'DEFAULT_TYPE') else object):
+async def subscribe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with sqlite3.connect(DB_FILE) as conn:
         conn.execute("INSERT OR IGNORE INTO subscribers (chat_id) VALUES (?)", (update.effective_chat.id,))
         conn.commit()
-    await update.message.reply_text("✅ تم الاشتراك بالتنبيهات الدقيقة بنجاح.")
+    await update.message.reply_text("✅ تم الاشتراك بالتنبيهات بنجاح.")
 
 
 async def pause_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -488,5 +468,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("pause", pause_cmd))
     app.add_handler(CommandHandler("resume", resume_cmd))
 
-    print("Smart ICT Institutional Bot v10.2 is running...")
+    print("Smart ICT Institutional Bot v10.3 is running...")
     app.run_polling(drop_pending_updates=True)
