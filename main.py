@@ -34,7 +34,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")        # اختياري: مر�
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")  # اختياري: تأكيد Claude
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5-5")
 
-VERSION = "v5-multischool"
+VERSION = "v6-pro"
 MIN_RR = 1.5          # أقل نسبة ربح/خسارة مقبولة للصفقة
 MAX_RISK_ATR = 3.0    # أقصى حجم للستوب بوحدات ATR
 
@@ -48,12 +48,13 @@ def _binance_klines(interval: str, limit: int = 150):
             r = requests.get(
                 f"{host}/api/v3/klines",
                 params={"symbol": "PAXGUSDT", "interval": interval, "limit": limit},
-                timeout=6,
+                timeout=8,
             ).json()
             if isinstance(r, list) and len(r) > 30:
                 return [
-                    {"o": float(c[1]), "h": float(c[2]), "l": float(c[3]), "c": float(c[4])}
-                    for c in r[:-1]  # حذف الشمعة غير المغلقة
+                    {"t": int(c[0]), "o": float(c[1]), "h": float(c[2]),
+                     "l": float(c[3]), "c": float(c[4])}
+                    for c in r[:-1]  # drop the unclosed candle
                 ]
         except Exception as e:
             print(f"Binance {host} {interval} error: {e}")
@@ -66,36 +67,71 @@ def _yahoo_klines(interval: str, rng: str):
             "https://query1.finance.yahoo.com/v8/finance/chart/GC=F",
             params={"interval": interval, "range": rng},
             headers={"User-Agent": "Mozilla/5.0"},
-            timeout=8,
+            timeout=10,
         ).json()
-        q = r["chart"]["result"][0]["indicators"]["quote"][0]
+        res = r["chart"]["result"][0]
+        q = res["indicators"]["quote"][0]
         out = []
-        for o, h, l, c in zip(q["open"], q["high"], q["low"], q["close"]):
+        for t, o, h, l, c in zip(res["timestamp"], q["open"], q["high"], q["low"], q["close"]):
             if None not in (o, h, l, c):
-                out.append({"o": o, "h": h, "l": l, "c": c})
+                out.append({"t": int(t) * 1000, "o": o, "h": h, "l": l, "c": c})
         return out[:-1] if len(out) > 30 else None
     except Exception as e:
         print(f"Yahoo {interval} error: {e}")
         return None
 
 
+def resample(candles, hours):
+    """Aggregate 1H candles into N-hour candles (keeps only (almost) complete buckets)."""
+    buckets, order = {}, []
+    ms = hours * 3_600_000
+    for i, c in enumerate(candles):
+        key = c["t"] // ms if "t" in c else i // hours
+        if key not in buckets:
+            buckets[key] = []
+            order.append(key)
+        buckets[key].append(c)
+    out = []
+    for k in order:
+        g = buckets[k]
+        if len(g) < hours - 1:
+            continue
+        out.append({"t": g[0].get("t"), "o": g[0]["o"], "h": max(x["h"] for x in g),
+                    "l": min(x["l"] for x in g), "c": g[-1]["c"]})
+    return out
+
+
 def fetch_market_data():
-    ltf = _binance_klines("15m") or _yahoo_klines("15m", "5d")
-    htf = _binance_klines("1h") or _yahoo_klines("60m", "1mo")
-    if not ltf or not htf:
+    source = "binance"
+    ltf = _binance_klines("15m", 150)
+    if not ltf:
+        source = "yahoo"
+        ltf = _yahoo_klines("15m", "5d")
+    h1 = _binance_klines("1h", 500) or _yahoo_klines("60m", "3mo")
+    if not ltf or not h1:
         return None
+    d1 = _binance_klines("1d", 200) or _yahoo_klines("1d", "1y")
+
+    htf = h1[-150:]
+    h4 = resample(h1, 4)[-120:]
 
     price = ltf[-1]["c"]
     try:
         p = requests.get("https://api.gold-api.com/price/XAU", timeout=4).json()
         live = float(p.get("price", 0))
-        # (section)
+        # accept the live price only if it is close to the candles (< 1.5% apart)
         if live > 0 and abs(live - price) / price < 0.015:
             price = round(live, 2)
     except Exception as e:
         print(f"Price API error: {e}")
 
-    return {"symbol": "XAU/USD", "price": price, "ltf": ltf, "htf": htf}
+    age_min = None
+    if ltf[-1].get("t"):
+        age_min = round((time.time() * 1000 - ltf[-1]["t"] - 900_000) / 60000)
+    return {"symbol": "XAU/USD", "price": price, "ltf": ltf, "htf": htf,
+            "source": source, "age_min": age_min,
+            "h4": h4 if len(h4) >= 30 else None,
+            "d1": d1 if d1 and len(d1) >= 55 else None}
 
 
 # =====================================================
@@ -293,7 +329,8 @@ def smc_signal(data: dict) -> dict:
 # =====================================================
 SCORE_MIN = 0.35
 WEIGHTS = {"ICT/SMC": 2.0, "الاتجاه EMA": 1.5, "الزخم RSI/MACD": 1.0,
-           "دعم/مقاومة+فيبو": 1.0, "حركة السعر": 0.8, "بولينجر": 0.5}
+           "دعم/مقاومة+فيبو": 1.0, "حركة السعر": 0.8, "بولينجر": 0.5,
+           "الإطار الأكبر 4H/D": 1.5}
 
 
 def clamp(v, lo=-1.0, hi=1.0):
@@ -453,6 +490,9 @@ def vote_bollinger(ltf):
 def build_signal(data: dict) -> dict:
     ltf, htf, price = data["ltf"], data["htf"], data["price"]
     a15, a1h = atr(ltf), atr(htf)
+    if a15 < 0.15 or (data.get("age_min") or 0) > 90:
+        return {"dir": "WAIT", "facts": {"atr15m": round(a15, 2)}, "votes": [], "score": 0.0,
+                "why": "بيانات غير موثوقة: الشموع شبه مسطحة أو قديمة (تحقق من مصدر البيانات)."}
     smc = smc_signal(data)
 
     results = [
@@ -462,6 +502,7 @@ def build_signal(data: dict) -> dict:
         ("دعم/مقاومة+فيبو",) + vote_sr_fib(data, a15, a1h),
         ("حركة السعر",) + vote_price_action(ltf, htf),
         ("بولينجر",) + vote_bollinger(ltf),
+        ("الإطار الأكبر 4H/D",) + vote_higher(data),
     ]
     total_w = sum(WEIGHTS.values())
     score = sum(WEIGHTS[n] * v for n, v, _ in results) / total_w
@@ -479,9 +520,12 @@ def build_signal(data: dict) -> dict:
     sign = 1 if score > 0 else -1
     agree = sum(1 for _, v, _ in results if v * sign >= 0.3)
     if agree < 3:
-        return {**base, "dir": "WAIT", "why": f"اتفقت {agree} مدارس فقط من 6 (المطلوب 3 على الأقل)."}
+        return {**base, "dir": "WAIT", "why": f"اتفقت {agree} مدارس فقط من {len(results)} (المطلوب 3 على الأقل)."}
     if results[0][1] * sign < 0 or results[1][1] * sign < 0:
         return {**base, "dir": "WAIT", "why": "تعارض مع ICT/SMC أو مع الاتجاه العام (EMA)."}
+
+    if results[-1][1] * sign <= -0.7:
+        return {**base, "dir": "WAIT", "why": "الصفقة تعاكس اتجاه الإطار الأكبر (4H/اليومي)."}
 
     # ---- المستويات ----
     if smc["dir"] == direction:
@@ -525,8 +569,277 @@ def build_signal(data: dict) -> dict:
         "tp1": round(tp1, 2),
         "tp2": round(tp2, 2),
         "rr": round(abs(tp1 - entry) / max(risk, 1e-9), 2),
-        "why": f"توافق {agree} مدارس من 6، الدرجة {score:+.2f}.",
+        "why": f"توافق {agree} مدارس من {len(results)}، الدرجة {score:+.2f}.",
     }
+
+
+# =====================================================
+# (section)
+# =====================================================
+import time
+import datetime as _dt
+
+DATA_DIR = os.environ.get("DATA_DIR", ".")
+JOURNAL_FILE = os.path.join(DATA_DIR, "journal.json")
+SUBS_FILE = os.path.join(DATA_DIR, "subs.json")
+SCAN_MINUTES = int(os.environ.get("SCAN_MINUTES", "15"))
+_lock = threading.Lock()
+
+
+def _load(path, default):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def _save(path, obj):
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False)
+    except Exception as e:
+        print(f"Save error {path}: {e}")
+
+
+# ---------- Higher timeframe (4H + daily) ----------
+def vote_higher(data):
+    h4, d1 = data.get("h4"), data.get("d1")
+    parts, notes = [], []
+    if h4:
+        c = [x["c"] for x in h4]
+        st, _, _ = structure(h4)
+        e50 = ema_series(c, 50)[-1]
+        v = (0.6 if st == "BULL" else -0.6 if st == "BEAR" else 0) + (0.4 if c[-1] > e50 else -0.4)
+        parts.append(v)
+        notes.append(f"4H {st}")
+    if d1:
+        c = [x["c"] for x in d1]
+        e20, e50 = ema_series(c, 20)[-1], ema_series(c, 50)[-1]
+        if c[-1] > e20 > e50:
+            v = 1.0
+        elif c[-1] < e20 < e50:
+            v = -1.0
+        else:
+            v = 0.5 if c[-1] > e50 else -0.5
+        parts.append(v)
+        notes.append("يومي " + ("صاعد" if v > 0 else "هابط"))
+    if not parts:
+        return 0.0, "لا بيانات للإطار الأكبر"
+    return clamp(sum(parts) / len(parts)), " | ".join(notes)
+
+
+# ---------- Session / news / pause filters ----------
+def session_ok(dt):
+    """London + New York liquidity hours (UTC), Mon-Fri."""
+    wd, h = dt.weekday(), dt.hour
+    if wd >= 5:
+        return False, "السوق مغلق (عطلة نهاية الأسبوع)"
+    if wd == 4 and h >= 19:
+        return False, "نهاية الأسبوع: سيولة ضعيفة"
+    if not (7 <= h < 20):
+        return False, "خارج ساعات لندن/نيويورك (سيولة ضعيفة)"
+    return True, ""
+
+
+def news_blocked(dt):
+    # first Friday of the month: NFP window (covers both DST offsets)
+    if dt.weekday() == 4 and dt.day <= 7 and (12 <= dt.hour < 15):
+        return "احتمال صدور NFP (تقلب شديد)"
+    for item in os.environ.get("NEWS_TIMES", "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            ev = _dt.datetime.strptime(item, "%Y-%m-%dT%H:%M").replace(tzinfo=_dt.timezone.utc)
+            delta = (dt - ev).total_seconds()  # negative = before the event
+            if -45 * 60 <= delta <= 30 * 60:
+                return f"خبر مهم عند {item} UTC"
+        except Exception:
+            continue
+    return None
+
+
+def blocked_reason(now=None):
+    now = now or _dt.datetime.now(_dt.timezone.utc)
+    st = _load(JOURNAL_FILE, {"signals": [], "paused_until": 0})
+    if st.get("paused_until", 0) > time.time():
+        return "البوت في وضع إيقاف مؤقت (/resume للاستئناف)"
+    ok, why = session_ok(now)
+    if not ok:
+        return why
+    return news_blocked(now)
+
+
+# ---------- Journal & results tracking ----------
+def _state():
+    st = _load(JOURNAL_FILE, {"signals": [], "paused_until": 0})
+    st.setdefault("signals", [])
+    st.setdefault("paused_until", 0)
+    return st
+
+
+def active_signal(direction):
+    with _lock:
+        for s in reversed(_state()["signals"]):
+            if s["dir"] == direction and s["status"] in ("pending", "open") and time.time() - s["ts"] < 3 * 3600:
+                return s
+    return None
+
+
+def record_signal(sig, data):
+    """Save a BUY/SELL signal. Returns (signal_dict, is_new)."""
+    ex = active_signal(sig["dir"])
+    if ex:
+        return ex, False
+    with _lock:
+        st = _state()
+        last = data["ltf"][-1].get("t") or int(time.time() * 1000)
+        limit = "Limit" in sig.get("mode", "")
+        s = {
+            "id": len(st["signals"]) + 1, "ts": time.time(), "t0": last, "dir": sig["dir"],
+            "entry": sig["entry"], "sl": sig["sl"], "tp1": sig["tp1"], "tp2": sig["tp2"],
+            "rr": sig["rr"], "score": sig.get("score"), "status": "pending" if limit else "open",
+            "result": None, "r": None,
+        }
+        st["signals"].append(s)
+        _save(JOURNAL_FILE, st)
+    return s, True
+
+
+def update_outcomes(candles):
+    """Walk candles after each active signal; returns the signals closed now."""
+    closed = []
+    if not candles or "t" not in candles[0]:
+        return closed
+    with _lock:
+        st = _state()
+        changed = False
+        for s in st["signals"]:
+            if s["status"] not in ("pending", "open"):
+                continue
+            buy = s["dir"] == "BUY"
+            risk = abs(s["entry"] - s["sl"]) or 1e-9
+            for c in candles:
+                if c["t"] <= s["t0"]:
+                    continue
+                if s["status"] == "pending":
+                    if c["l"] <= s["entry"] <= c["h"]:
+                        s["status"] = "open"
+                        changed = True
+                    continue
+                hit_sl = c["l"] <= s["sl"] if buy else c["h"] >= s["sl"]
+                hit_tp = c["h"] >= s["tp1"] if buy else c["l"] <= s["tp1"]
+                if hit_sl:  # conservative: SL first when both inside one candle
+                    s.update(status="closed", result="SL", r=-1.0)
+                elif hit_tp:
+                    s.update(status="closed", result="TP1", r=round(abs(s["tp1"] - s["entry"]) / risk, 2))
+                if s["status"] == "closed":
+                    changed = True
+                    closed.append(dict(s))
+                    break
+            if s["status"] in ("pending", "open") and time.time() - s["ts"] > 24 * 3600:
+                if s["status"] == "pending":
+                    s.update(status="closed", result="UNFILLED", r=0.0)
+                else:
+                    last = candles[-1]["c"]
+                    r = ((last - s["entry"]) if buy else (s["entry"] - last)) / risk
+                    s.update(status="closed", result="EXPIRED", r=round(r, 2))
+                changed = True
+                closed.append(dict(s))
+        if changed:
+            _save(JOURNAL_FILE, st)
+    return closed
+
+
+def result_text(s):
+    icon = {"TP1": "✅", "SL": "❌", "EXPIRED": "⏱", "UNFILLED": "➖"}.get(s["result"], "")
+    return f'{icon} نتيجة الصفقة #{s["id"]} ({s["dir"]}): {s["result"]} ({s["r"]:+.2f}R)'
+
+
+def stats_text():
+    sigs = _state()["signals"]
+    done = [s for s in sigs if s["status"] == "closed" and s["result"] in ("TP1", "SL", "EXPIRED")]
+    active = [s for s in sigs if s["status"] in ("pending", "open")]
+    if not sigs:
+        return "📊 لا توجد صفقات مسجلة بعد."
+    wins = [s for s in done if s["r"] > 0]
+    losses = [s for s in done if s["r"] <= 0]
+    lines = ["📊 إحصائيات الصفقات", "────────────────",
+             f"المسجلة: {len(sigs)} | المفتوحة/المعلّقة: {len(active)} | المغلقة: {len(done)}"]
+    if done:
+        gp = sum(s["r"] for s in wins)
+        gl = -sum(s["r"] for s in losses)
+        lines += [
+            f"✅ رابحة: {len(wins)} | ❌ خاسرة: {len(losses)}",
+            f"نسبة النجاح: {100 * len(wins) / len(done):.0f}%",
+            f"متوسط النتيجة: {sum(s['r'] for s in done) / len(done):+.2f}R",
+            f"عامل الربح: {gp / gl:.2f}" if gl > 0 else "عامل الربح: —",
+        ]
+    lines.append("")
+    for s in sigs[-5:]:
+        res = s["result"] or s["status"]
+        lines.append(f'#{s["id"]} {s["dir"]} @ {s["entry"]} → {res}')
+    lines += ["", "ملاحظة: النتيجة تُحسب عند TP1 أو SL، والعينة الصغيرة لا تعني الكثير إحصائياً."]
+    return "\n".join(lines)
+
+
+def lot_size(sig):
+    try:
+        bal = float(os.environ.get("ACCOUNT_BALANCE", "0"))
+        pct = float(os.environ.get("RISK_PCT", "1"))
+    except ValueError:
+        return None
+    if bal <= 0:
+        return None
+    per_lot_loss = abs(sig["entry"] - sig["sl"]) * 100  # 1 lot = 100 oz
+    if per_lot_loss <= 0:
+        return None
+    return round(bal * pct / 100 / per_lot_loss, 2), pct, bal
+
+
+# ---------- Telegram push + background scanner ----------
+def tg_send(chat_id, text):
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": text}, timeout=10,
+        )
+    except Exception as e:
+        print(f"Telegram send error: {e}")
+
+
+def broadcast(text):
+    for cid in _load(SUBS_FILE, []):
+        tg_send(cid, text)
+
+
+def scan_once():
+    data = fetch_market_data()
+    if not data:
+        return
+    for s in update_outcomes(data["ltf"]):
+        broadcast(result_text(s))
+    if blocked_reason():
+        return
+    sig = build_signal(data)
+    if sig["dir"] not in ("BUY", "SELL") or active_signal(sig["dir"]):
+        return
+    sig, notes = finalize(data, sig)
+    if sig["dir"] in ("BUY", "SELL"):
+        rec, new = record_signal(sig, data)
+        if new:
+            broadcast("🔔 إشارة جديدة #%d\n\n" % rec["id"] + format_message(data, sig, notes))
+
+
+def scanner_loop():
+    time.sleep(30)
+    while True:
+        try:
+            scan_once()
+        except Exception as e:
+            print(f"Scanner error: {e}")
+        time.sleep(SCAN_MINUTES * 60)
 
 
 # =====================================================
@@ -635,6 +948,10 @@ def format_message(data, sig, notes):
     else:
         lines += ["🎯 TP1: N/A", "🎯 TP2: N/A", "🛑 SL: N/A"]
 
+    if sig["dir"] in ("BUY", "SELL"):
+        ls = lot_size(sig)
+        if ls:
+            lines.append(f"📦 حجم مقترح: {ls[0]} لوت (مخاطرة {ls[1]:g}% من {ls[2]:g}$)")
     lines += ["", f'💡 السبب: {sig["why"]}', ""]
     if sig.get("votes"):
         lines.append(f'🏫 المدارس (الدرجة {sig["score"]:+.2f}):')
@@ -648,7 +965,7 @@ def format_message(data, sig, notes):
     )
     if notes:
         lines += [""] + notes
-    lines += ["", f'🔖 النسخة: {VERSION} | شموع: {len(data["ltf"])}/{len(data["htf"])}', "⚠️ تحليل آلي تعليمي وليس نصيحة مالية. التزم بإدارة رأس المال."]
+    lines += ["", f'🔖 النسخة: {VERSION} | المصدر: {data.get("source")} | عمر آخر شمعة: {data.get("age_min")} د | شموع: {len(data["ltf"])}/{len(data["htf"])}', "⚠️ تحليل آلي تعليمي وليس نصيحة مالية. التزم بإدارة رأس المال."]
     return "\n".join(lines)
 
 
@@ -657,27 +974,82 @@ def format_message(data, sig, notes):
 # =====================================================
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🧠 أهلاً بك في بوت التحليل (ICT & SMC)\n\n"
-        "البوت يحسب الهيكل والسيولة وOrder Blocks وFVG من شموع حقيقية، "
-        "ثم يراجع الصفقة عبر Claude/Gemini قبل إرسالها.\n\n"
-        "للتحليل: /analyze GOLD"
+        "🧠 بوت التحليل متعدد المدارس (ICT/SMC + EMA + RSI/MACD + دعم/مقاومة/فيبو + شموع + بولينجر + 4H/يومي)\n\n"
+        "/analyze  تحليل فوري (أضف force لتجاهل فلتر الجلسات)\n"
+        "/subscribe  استلام الإشارات تلقائياً\n"
+        "/unsubscribe  إيقاف التنبيهات\n"
+        "/stats  إحصائيات نتائج الصفقات\n"
+        "/pause 60  إيقاف الإشارات لمدة 60 دقيقة\n"
+        "/resume  استئناف الإشارات\n\n"
+        "⚠️ تحليل آلي تعليمي وليس نصيحة مالية."
     )
 
 
 async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
+        force = any(a.lower() == "force" for a in (context.args or []))
         msg = await update.message.reply_text("🔍 جاري فحص بنية السوق والسيولة...")
         data = fetch_market_data()
         if not data:
             await msg.edit_text("❌ تعذّر جلب بيانات الشموع الآن. لن أعطي تحليلاً بدون بيانات حقيقية، حاول لاحقاً.")
             return
+        for s in update_outcomes(data["ltf"]):
+            broadcast(result_text(s))
+
         sig = build_signal(data)
+        if sig["dir"] in ("BUY", "SELL") and not force:
+            why = blocked_reason()
+            if why:
+                sig = {**sig, "dir": "WAIT", "why": f"{why}. (أرسل /analyze force لتجاهل الفلتر)"}
+
         sig, notes = finalize(data, sig)
         if sig["dir"] == "WAIT":
             notes = watch_levels(data) + notes
+        else:
+            rec, new = record_signal(sig, data)
+            notes = notes + [f"📝 سُجّلت كصفقة #{rec['id']}" if new else f"ℹ️ صفقة مماثلة مسجلة سابقاً #{rec['id']}"]
         await msg.edit_text(format_message(data, sig, notes))
     except Exception as e:
         await update.message.reply_text(f"حدث خطأ: {e}")
+
+
+async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(stats_text())
+
+
+async def subscribe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    subs = _load(SUBS_FILE, [])
+    cid = update.effective_chat.id
+    if cid not in subs:
+        subs.append(cid)
+        _save(SUBS_FILE, subs)
+    await update.message.reply_text(f"✅ تم الاشتراك. سيفحص البوت السوق كل {SCAN_MINUTES} دقيقة ويرسل الإشارات والنتائج تلقائياً.")
+
+
+async def unsubscribe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    subs = [c for c in _load(SUBS_FILE, []) if c != update.effective_chat.id]
+    _save(SUBS_FILE, subs)
+    await update.message.reply_text("تم إيقاف التنبيهات.")
+
+
+async def pause_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        mins = int(context.args[0]) if context.args else 60
+    except ValueError:
+        mins = 60
+    with _lock:
+        st = _state()
+        st["paused_until"] = time.time() + mins * 60
+        _save(JOURNAL_FILE, st)
+    await update.message.reply_text(f"⏸ تم إيقاف الإشارات {mins} دقيقة.")
+
+
+async def resume_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    with _lock:
+        st = _state()
+        st["paused_until"] = 0
+        _save(JOURNAL_FILE, st)
+    await update.message.reply_text("▶️ تم استئناف الإشارات.")
 
 
 # =====================================================
@@ -689,10 +1061,16 @@ if __name__ == "__main__":
         raise SystemExit(1)
 
     threading.Thread(target=start_health_server, daemon=True).start()
+    threading.Thread(target=scanner_loop, daemon=True).start()
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("analyze", analyze_cmd))
+    app.add_handler(CommandHandler("stats", stats_cmd))
+    app.add_handler(CommandHandler("subscribe", subscribe_cmd))
+    app.add_handler(CommandHandler("unsubscribe", unsubscribe_cmd))
+    app.add_handler(CommandHandler("pause", pause_cmd))
+    app.add_handler(CommandHandler("resume", resume_cmd))
 
     print("Smart ICT Bot is running...")
     app.run_polling(drop_pending_updates=True)
